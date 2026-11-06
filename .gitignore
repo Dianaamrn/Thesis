@@ -1,0 +1,32 @@
+# Data (too large for GitHub; see README for where it lives)
+data/
+*.tsv
+*.tsv.gz
+*.csv.gz
+*.tgz
+
+# Earlier work, kept in its own repo (github.com/Dianaamrn/adazor-biomedical-drift)
+adazor-biomedical-drift/
+
+# Run outputs
+phase1/runs/
+phase1/runs_pilot/
+phase1/analysis/
+phase1/quality/
+phase1/*.log
+.pystow/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

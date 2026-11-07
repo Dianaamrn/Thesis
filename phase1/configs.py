@@ -85,8 +85,18 @@ PRESETS = {
 # cutoff KG: best validation MRR over the learning rates tried, epochs = epoch of that best MRR.
 # The cutoff KG does not depend on the stream, so one entry per dataset file is enough.
 # Empty until the settings check has been run: drift_sphere.py refuses to start without it.
+# Results of settings_check.py on the server, 2026-11-07 (validation MRR, x = times random guessing):
 TRAINING = {
-    # ('case1', 'TransE'): {'learning_rate': ..., 'epochs': ...},
+    ('case1', 'TransE'):   {'learning_rate': 0.001, 'epochs': 100},  # MRR 0.106,  670x (still improving at 100)
+    ('case1', 'TransH'):   {'learning_rate': 0.001, 'epochs': 20},   # MRR 0.078,  490x
+    ('case1', 'DistMult'): {'learning_rate': 0.001, 'epochs': 100},  # MRR 0.107,  675x (still improving at 100)
+    ('case1', 'ComplEx'):  {'learning_rate': 0.01,  'epochs': 100},  # MRR 0.179, 1130x (still improving at 100)
+    ('case1', 'RotatE'):   {'learning_rate': 0.001, 'epochs': 100},  # MRR 0.174, 1095x (still improving at 100)
+    ('full', 'TransE'):    {'learning_rate': 0.001, 'epochs': 100},  # MRR 0.107,  909x (still improving at 100)
+    ('full', 'TransH'):    {'learning_rate': 0.001, 'epochs': 30},   # MRR 0.037,  318x
+    ('full', 'DistMult'):  {'learning_rate': 0.001, 'epochs': 50},   # MRR 0.052,  440x
+    ('full', 'ComplEx'):   {'learning_rate': 0.01,  'epochs': 80},   # MRR 0.109,  930x
+    ('full', 'RotatE'):    {'learning_rate': 0.001, 'epochs': 100},  # MRR 0.140, 1193x (still improving at 100)
 }
 
 

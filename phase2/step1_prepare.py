@@ -49,8 +49,8 @@ def prepare_pool(dataset, variant, max_stream=None, overwrite=False):
     return train, pool
 
 
-def prepare_model(dataset, variant, model, train, pool, seed, embedder, device, overwrite=False):
-    out = lib_data.kge_features_path(dataset, model, variant, seed)
+def prepare_model(dataset, variant, model, train, pool, seed, embedder, device, overwrite=False, epochs=None):
+    out = lib_data.kge_features_path(dataset, model, variant, seed, epochs)
     if out.exists() and not overwrite:
         print(f'  [skip] {out.name} exists')
         return
@@ -58,7 +58,7 @@ def prepare_model(dataset, variant, model, train, pool, seed, embedder, device, 
     if embedder == 'random':
         kge, train_s = lib_kge.FrozenKGE.random(train, seed, device), 0.0
     else:
-        kge, train_s = lib_kge.train_pykeen(train, model, seed, device)
+        kge, train_s = lib_kge.train_pykeen(train, model, seed, device, epochs=epochs)
     t1 = time.time()
     overrides, folded, unscorable = lib_kge.first_appearance_foldin(kge, pool)
     foldin_s = time.time() - t1
@@ -85,7 +85,7 @@ def prepare_model(dataset, variant, model, train, pool, seed, embedder, device, 
                         score=score, folded=folded, unscorable=unscorable,
                         train_seconds=train_s, foldin_seconds=foldin_s, n_train_triples=len(train),
                         n_entities=len(kge.entity_to_id), n_folded_entities=len(overrides),
-                        embedder=embedder, seed=seed)
+                        embedder=embedder, seed=seed, epochs=epochs or settings.KGE['epochs'])
     print(f'  {model} {variant}: trained {train_s:.0f}s, folded in {len(overrides)} entities '
           f'({foldin_s:.0f}s), {int(folded.sum())}/{len(pool)} triples use a folded vector, '
           f'total {time.time() - t0:.0f}s', flush=True)
@@ -101,6 +101,7 @@ def main(argv=None):
     p.add_argument('--model', nargs='+', default=['all'], help='model names or "all"')
     p.add_argument('--variant', nargs='+', default=['holdout', 'full'], choices=['holdout', 'full'])
     p.add_argument('--seed', type=int, default=settings.KGE['seed'])
+    p.add_argument('--epochs', type=int, default=None, help='training epochs (default: Phase 1 setting, 10)')
     p.add_argument('--embedder', default='pykeen', choices=['pykeen', 'random'], help='random = smoke test only')
     p.add_argument('--device', default='auto')
     p.add_argument('--max-stream', type=int, default=None, help='keep only the first N stream triples (smoke test)')
@@ -115,7 +116,8 @@ def main(argv=None):
               f'({int(pool["part"].ne("stream").sum())} reference side, {int(pool["part"].eq("stream").sum())} stream; '
               f'{int(pool["novel"].sum())} with an unseen entity)', flush=True)
         for model in models:
-            prepare_model(args.dataset, variant, model, train, pool, args.seed, args.embedder, device, args.overwrite)
+            prepare_model(args.dataset, variant, model, train, pool, args.seed, args.embedder, device, args.overwrite,
+                          args.epochs)
     return 0
 
 

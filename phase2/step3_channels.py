@@ -1,15 +1,16 @@
-"""Step 3 (CPU): every monitoring channel on real, no-drift and injected-switch streams.
+"""Step 3 (CPU): every measure of change on real, no-drift and injected-switch streams (Part 1.5, 2.3, 2.4, 2.6).
 
-Experiments 1, 5-9, 11 and 12. Uses the holdout embedding from step 1 (reference and stream are both
-unseen by the embedding). Scenarios:
+Uses the 'holdout' embedding from step 1 (reference and stream triples are equally unseen by it). Streams:
   real     the real stream in time order; reference = the 500 most recent pre-cutoff triples
   control  NO drift: the pre-switch triples shuffled; reference = first 500, stream = the rest
-           (repeated MONTE_CARLO['control'] times)                                     -> Exp 1
   inject   the switch at a random position: shuffled pre-switch triples, then post-switch triples
-           (repeated MONTE_CARLO['inject'] times)                                      -> Exp 5-9, 11, 12
+Measures (settings.CHANNELS): triple types, new entities, MONDO categories, KGE plausibility, MMD on
+vectors, and the OCSVM outlier rate with Antoine's statistics / a fair reference / + calibrated threshold.
+For the threshold-free comparison each run also saves the statistic's maximum before the switch and its
+running maximum at fixed delays after it.
 
 Writes outputs/channels/<dataset>/:
-  runs/<scenario>_<repeat>.csv   one row per channel x model x composition (resumable)
+  runs/<scenario>_<repeat>.csv   one row per measure x model x composition (resumable)
   runs.csv                       all rows together
   series_real.csv.gz             the statistic and threshold at every tested position (real order)
   meta.json                      settings, MONDO release
@@ -89,6 +90,15 @@ def run_one(job):
                'stat_max': float(stat.max()) if len(stat) else np.nan,
                'alarm_positions': ' '.join(map(str, alarms)), 'seconds': time.time() - t0, **ch.info}
         row.update(lib_detect.score_run(alarms, tested, len(stream), switch))
+        if switch is not None and len(stat):
+            # Threshold-free comparison: the statistic's maximum before the switch, and its running
+            # maximum at fixed delays after the switch (first alarm at any threshold can be read off).
+            pre, post = stat[pos < switch], pos >= switch
+            row['stat_max_pre'] = float(pre.max()) if len(pre) else np.nan
+            grid = np.asarray(settings.MONTE_CARLO['delay_grid'])
+            delays, vals = pos[post] - switch, stat[post]
+            runmax = [float(vals[delays <= g].max()) if (delays <= g).any() else np.nan for g in grid]
+            row['post_runmax'] = ' '.join(f'{v:.6g}' for v in runmax)
         if scenario == 'real':
             row['first_alarm_year'] = float(pool['event_year'].iloc[stream[alarms[0]]]) if alarms else np.nan
             series.append(pd.DataFrame({'channel': name, 'model': model, 'composition': comp, 'position': pos,

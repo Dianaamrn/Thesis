@@ -1,12 +1,14 @@
-"""Step 4 (GPU): how different are two trainings of the same graph? (Experiment 3)
+"""Step 4 (GPU): can embeddings retrained from scratch be compared directly? (Part 1.2)
 
 Trains every model with several seeds on
-  G0 = the cutoff graph (what A0 starts from)
+  G0 = the cutoff graph (what Antoine's method starts from)
   G1 = G0 + the pre-switch stream triples (a grown graph with NO topic change)
 and compares pairs of embeddings, matching entities by label:
-  seed_only        G0 seed i  vs G0 seed j          only the random seed differs: the noise floor
-  same_seed_grown  G0 seed s  vs G1 seed s          exactly what A0 does on a re-embed (seed 42 every time)
-  cross            G0 seed i  vs G1 seed j          graph and seed differ
+  identical_rerun   G0 seed s  vs G0 seed s again   same data, same seed: is training even repeatable?
+  seed_only         G0 seed i  vs G0 seed j          only the random seed differs: the noise floor
+  same_seed_grown   G0 seed s  vs G1 seed s          what Antoine's method does at a re-embed (seed 42 every time)
+  warm_start_grown  G0 seed s  vs G1 warm-started    G1 trained by CONTINUING from the G0 model (not from zero)
+  cross             G0 seed i  vs G1 seed j          graph and seed differ
 Measures (frame-free or after alignment):
   raw_cosine        mean cosine of the same entity in the two raw coordinate systems
   aligned_cosine    the same after orthogonal Procrustes (best rotation of A onto B)
@@ -28,9 +30,11 @@ import itertools
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import settings  # noqa: E402
@@ -49,29 +53,43 @@ def graphs(dataset):
     return {'G0': g0, 'G1': g1}, ref, pre
 
 
-def train_or_load(path, triples, model, seed, device, embedder):
+def train_or_load(path, triples, model, seed, device, embedder, init_from=None, epochs=None):
+    """Train (or load a saved) embedding. Saves the comparison vectors (real, L2-normalised, as Phase 1
+    builds features) and the raw model representations (needed to warm-start from it)."""
     if path.exists():
         z = np.load(path, allow_pickle=False)
-        return {'labels': z['labels'].tolist(), 'E': z['E'], 'rel_labels': z['rel_labels'].tolist(), 'R': z['R']}
+        return {k: (z[k].tolist() if k in ('labels', 'rel_labels') else z[k]) for k in z.files}
     if embedder == 'random':
-        kge, secs = lib_kge.FrozenKGE.random(triples, seed), 0.0
+        kge, secs = lib_kge.FrozenKGE.random(triples, seed + (7 if init_from is not None else 0)), 0.0
     else:
-        kge, secs = lib_kge.train_pykeen(triples, model, seed, device)
+        kge, secs = lib_kge.train_pykeen(triples, model, seed, device, epochs=epochs,
+                                         init_from=as_init(init_from) if init_from is not None else None)
     labels = sorted(kge.entity_to_id, key=kge.entity_to_id.get)
     rel_labels = sorted(kge.relation_to_id, key=kge.relation_to_id.get)
+
+    def raw(x):
+        return (torch.view_as_real(x) if torch.is_complex(x) else x).detach().cpu().numpy()
+
     out = {'labels': labels, 'E': kge.entity_matrix().astype(np.float32), 'rel_labels': rel_labels,
-           'R': kge.relation_matrix().astype(np.float32)}
+           'R': kge.relation_matrix().astype(np.float32), 'E_raw': raw(kge.E),
+           'complex': np.asarray(torch.is_complex(kge.E)), 'n_rel_reps': np.asarray(len(kge.rels)),
+           'train_seconds': np.asarray(secs)}
+    out.update({f'rel_raw_{j}': raw(r) for j, r in enumerate(kge.rels)})
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, labels=np.asarray(labels), E=out['E'], rel_labels=np.asarray(rel_labels), R=out['R'],
-                        train_seconds=secs)
+    np.savez_compressed(path, **{k: (np.asarray(v) if isinstance(v, list) else v) for k, v in out.items()})
     print(f'    trained {path.stem} in {secs:.0f}s', flush=True)
     return out
 
 
-def procrustes(A, B):
-    """Orthogonal R minimising ||A R - B|| (Schonemann 1966): R = U V^T from the SVD of A^T B."""
-    U, _, Vt = np.linalg.svd(A.T @ B)
-    return U @ Vt
+def as_init(emb):
+    """A saved embedding as the minimal object lib_kge.train_pykeen needs to warm-start from it."""
+    def tensor(x):
+        t = torch.as_tensor(np.asarray(x))
+        return torch.view_as_complex(t.contiguous()) if bool(emb['complex']) else t
+    return SimpleNamespace(entity_to_id={x: i for i, x in enumerate(emb['labels'])},
+                           relation_to_id={x: i for i, x in enumerate(emb['rel_labels'])},
+                           E=tensor(emb['E_raw']),
+                           rels=[tensor(emb[f'rel_raw_{j}']) for j in range(int(emb['n_rel_reps']))])
 
 
 def linear_cka(X, Y):
@@ -111,7 +129,7 @@ def compare(a, b, ref, test, rng):
     pb = {x: i for i, x in enumerate(b['labels'])}
     A = a['E'][[pa[x] for x in shared]].astype(np.float64)
     B = b['E'][[pb[x] for x in shared]].astype(np.float64)
-    Rm = procrustes(A, B)
+    Rm = lib_kge.procrustes(A, B)
     AR = A @ Rm
     out = {'shared_entities': len(shared),
            'raw_cosine': float(np.mean(np.sum(A * B, 1))),
@@ -154,11 +172,20 @@ def main(argv=None):
     rng = np.random.default_rng(0)
     for model in args.models:
         t0 = time.time()
-        emb = {(gname, s): train_or_load(out_dir / 'embeddings' / f'{model}__{gname}__seed{s}.npz', triples,
-                                         model, s, device, args.embedder)
+        edir = out_dir / 'embeddings'
+        emb = {(gname, s): train_or_load(edir / f'{model}__{gname}__seed{s}.npz', triples, model, s, device,
+                                         args.embedder)
                for gname, triples in g.items() for s in args.seeds}
-        pairs = [('seed_only', ('G0', i), ('G0', j)) for i, j in itertools.combinations(args.seeds, 2)]
+        s0 = args.seeds[0]
+        emb[('G0rerun', s0)] = train_or_load(edir / f'{model}__G0__seed{s0}__rerun.npz', g['G0'], model, s0, device,
+                                             args.embedder)
+        for s in args.seeds:
+            emb[('G1warm', s)] = train_or_load(edir / f'{model}__G1warm__seed{s}.npz', g['G1'], model, s, device,
+                                               args.embedder, init_from=emb[('G0', s)], epochs=st['warm_epochs'])
+        pairs = [('identical_rerun', ('G0', s0), ('G0rerun', s0))]
+        pairs += [('seed_only', ('G0', i), ('G0', j)) for i, j in itertools.combinations(args.seeds, 2)]
         pairs += [('same_seed_grown', ('G0', s), ('G1', s)) for s in args.seeds]
+        pairs += [('warm_start_grown', ('G0', s), ('G1warm', s)) for s in args.seeds]
         cross = [(i, j) for i in args.seeds for j in args.seeds if i != j]
         sel = rng.permutation(len(cross))[:st['cross_pairs']]
         pairs += [('cross', ('G0', cross[k][0]), ('G1', cross[k][1])) for k in sel]

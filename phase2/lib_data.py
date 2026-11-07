@@ -224,9 +224,9 @@ def pool_path(dataset, variant):
     return feature_dir(dataset) / f'pool__{variant}.tsv.gz'
 
 
-def kge_features_path(dataset, model, variant, seed=None):
+def kge_features_path(dataset, model, variant, seed=None, epochs=None):
     seed = settings.KGE['seed'] if seed is None else seed
-    return feature_dir(dataset) / f'{model}__{variant}__seed{seed}.npz'
+    return feature_dir(dataset) / f'{model}__{variant}__seed{seed}{settings.epochs_suffix(epochs)}.npz'
 
 
 def categories_path(dataset):

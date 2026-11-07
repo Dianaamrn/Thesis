@@ -1,4 +1,5 @@
-"""Frozen knowledge-graph embedding: train once, fold in new entities, score and featurise triples.
+"""Knowledge-graph embeddings for Phase 2: train (from scratch or warm-started), freeze, fold in new
+entities, align (Procrustes), score and featurise triples.
 
 The embedding is trained ONCE on the reference graph (PyKEEN, same settings as Phase 1) and never
 retrained during the stream. A new entity gets its own vector, fitted on the triple that introduced
@@ -28,7 +29,10 @@ def pick_device(device='auto'):
 # Training (same as phase1/drift_sphere.py:_train_embeddings, but the model is kept)
 # ---------------------------------------------------------------------------
 
-def train_pykeen(triples, model_name, seed, device):
+def train_pykeen(triples, model_name, seed, device, epochs=None, init_from=None):
+    """Train a PyKEEN model. epochs: default = Phase 1's 10.
+    init_from: a FrozenKGE to warm-start from -- every entity/relation it knows starts at its old
+    vector (matched by label), new ones start at PyKEEN's random initialisation; then training continues."""
     import pykeen.models as pykeen_models
     from pykeen.training import SLCWATrainingLoop
     from pykeen.triples import TriplesFactory
@@ -38,12 +42,39 @@ def train_pykeen(triples, model_name, seed, device):
     dim = settings.KGE['real_dim'] // 2 if model_name in settings.COMPLEX_MODELS else settings.KGE['real_dim']
     model = getattr(pykeen_models, model_name)(triples_factory=tf, embedding_dim=dim, random_seed=seed)
     model = model.to(torch.device(device))
+    if init_from is not None:
+        _copy_rows(model.entity_representations[0], tf.entity_to_id, init_from.entity_to_id, init_from.E)
+        for rep, old in zip(model.relation_representations, init_from.rels):
+            _copy_rows(rep, tf.relation_to_id, init_from.relation_to_id, old)
+        # PyKEEN re-initialises all weights at the start of train() unless training is "continued";
+        # switch that off so the copied rows are kept (new rows keep their random initialisation).
+        model.reset_parameters_ = lambda *args, **kwargs: model
     loop = SLCWATrainingLoop(model=model, triples_factory=tf)
-    loop.train(triples_factory=tf, num_epochs=settings.KGE['epochs'],
+    loop.train(triples_factory=tf, num_epochs=epochs or settings.KGE['epochs'],
                batch_size=min(settings.KGE['batch_size'], max(32, len(triples))),
                use_tqdm=False, use_tqdm_batch=False, pin_memory=False, num_workers=0)
     model.eval()
     return FrozenKGE.from_pykeen(model, tf, device), time.time() - started
+
+
+def _copy_rows(rep, new_ids, old_ids, old_values):
+    """Warm start: write old representation rows into a new model's embedding table, by label."""
+    shared = [x for x in new_ids if x in old_ids]
+    if not shared:
+        return
+    dev = rep._embeddings.weight.device
+    new_idx = torch.tensor([new_ids[x] for x in shared], device=dev)
+    old = old_values[torch.tensor([old_ids[x] for x in shared], device=old_values.device)]
+    if torch.is_complex(old):
+        old = torch.view_as_real(old)
+    with torch.no_grad():
+        rep._embeddings.weight.data[new_idx] = old.reshape(len(shared), -1).to(dev, rep._embeddings.weight.dtype)
+
+
+def procrustes(A, B):
+    """Orthogonal R minimising ||A R - B|| (Schonemann 1966): R = U V^T from the SVD of A^T B."""
+    U, _, Vt = np.linalg.svd(A.T @ B)
+    return U @ Vt
 
 
 # ---------------------------------------------------------------------------

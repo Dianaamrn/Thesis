@@ -1,17 +1,22 @@
-"""Phase 2 settings (settings.py; Phase 1 has its own configs.py). Every number used by the Phase 2 scripts is set here.
+"""Phase 2 settings (settings.py; Phase 1 has its own configs.py). Every number used by Phase 2 is set here.
 
-Phase 2 replaces "re-embed on every new entity" with a fixed (frozen) reference and asks how much
-of the Phase 1 alarm pattern came from the method itself. See reports/Phase 2 research explained.md.
+Phase 2 has two parts (see phase2/README.md and the notebooks in phase2/notebooks/):
 
-Experiments (numbers follow reports/Graph change measurement in streams.md, section c):
-  Exp 1   no-drift control streams: how often does each detector fire when nothing changes?
-  Exp 2   frozen embedding vs re-embedding: A0 (Phase 1) vs A1 (same method, embedding frozen)
-  Exp 3   seed / alignment test: how different are two trainings of the same graph?
-  Exp 5-9 monitoring channels C1-C5 on the known switch (real order + switch injected at random points)
-  Exp 10  period-level graph distances (C6)
-  Exp 11  calibration: fixed z/sqrt(2n) threshold vs threshold calibrated to a false-alarm budget
-  Exp 12  conformal reference rate for the OCSVM (A1 -> A2)
-Not implemented here (lower priority in the report): Exp 4 warm start, Exp 13 MIDAS burst baseline.
+PART 1  Evaluating Antoine's method, with evidence
+  1.1 the sphere rule (almost) never fires: geometry + Phase 1 ratios + the sphere-size sweep
+  1.2 embeddings retrained from scratch cannot be compared directly: seed test (several seeds, a
+      grown graph, an identical rerun, a warm start), with and without alignment
+  1.3 the alarms come from re-embedding: the same method with the embedding held fixed
+  1.4 the method fires when nothing changes: no-drift streams
+  1.5 its statistics are biased: fair (held-out) reference, then a threshold set for repeated tests
+PART 2  What other researchers do, tested on the cases (one known drift each)
+  2.1 retrain, then align the new embedding onto the old one (orthogonal Procrustes)
+  2.2 fixed embedding + fold-in for new entities
+  2.3 fair reference + calibrated threshold
+  2.4 simple measures of change: triple types, new entities, MONDO categories, plausibility, MMD
+  2.5 graph distances year by year
+  2.6 every method judged the same way: no-drift and injected-switch streams, threshold-free comparison,
+      peak analysis; plus an embedding-quality check (TransE trained until MRR is reasonable)
 """
 import os
 import sys
@@ -56,14 +61,16 @@ WINDOW = 250
 REFERENCE = {'size': 500, 'fit': 250}     # reference = 500 triples: 250 to fit, 250 to calibrate
 OCSVM = {'nu': 0.1, 'gamma': 'scale', 'standardize': True}
 ALPHA = 0.025                             # Phase 1 alpha, used by the fixed z/sqrt(2n) threshold
-KEEP_FRACTION_AFTER_DRIFT = 0.10          # A1 only (same as A0)
+KEEP_FRACTION_AFTER_DRIFT = 0.10          # Antoine's refill rule (stream methods)
 
 # Calibrated thresholds: at most BETA chance of any false alarm in HORIZON triples of no-drift data,
 # found by simulating no-drift streams resampled from the calibration half of the reference.
 CALIBRATION = {'horizon': 1000, 'beta': 0.10, 'n_boot': 200}
 
 # Monte Carlo: number of no-drift control streams and of injected-switch streams per dataset.
-MONTE_CARLO = {'control': 100, 'inject': 100, 'post_len': 1000, 'seed': 0}
+# delay_grid: delays (triples after the switch) at which the running maximum of each statistic is saved,
+# for the threshold-free comparison.
+MONTE_CARLO = {'control': 100, 'inject': 100, 'post_len': 1000, 'seed': 0, 'delay_grid': list(range(0, 1001, 25))}
 
 # Monitoring channels (C1-C5). stride = test every `stride` triples (1 = every triple).
 CHANNELS = {
@@ -79,13 +86,13 @@ CHANNELS = {
     'C4_mmd':          {'per_model': True, 'per_composition': True, 'stride': 25, 'pca': 16, 'n_boot': 100,
                         'what': 'triple feature vectors', 'test': 'MMD (RBF, median bandwidth)'},
     'C5_insample_fixed':     {'per_model': True, 'per_composition': True, 'stride': 1,
-                              'what': 'OCSVM outlier rate, in-sample reference rate, z/sqrt(2n) threshold (as A0/A1)',
+                              'what': 'OCSVM outlier rate, in-sample reference rate, z/sqrt(2n) threshold (as Antoine)',
                               'test': 'ADAZOR Z-test'},
     'C5_conformal_fixed':    {'per_model': True, 'per_composition': True, 'stride': 1,
                               'what': 'OCSVM outlier rate, conformal reference rate, z/sqrt(2n) threshold',
                               'test': 'ADAZOR Z-test'},
     'C5_conformal_calibrated': {'per_model': True, 'per_composition': True, 'stride': 1,
-                                'what': 'OCSVM outlier rate, conformal reference rate, calibrated threshold (A2)',
+                                'what': 'OCSVM outlier rate, conformal reference rate, calibrated threshold',
                                 'test': 'ADAZOR statistic, calibrated'},
 }
 # Every channel except the two "fixed" ones uses a calibrated threshold.
@@ -101,13 +108,36 @@ MONDO = {
     'fallback_root': 'MONDO:0000001',  # "disease", for older releases without MONDO:0700096
 }
 
-# Exp 3: seed / alignment test.
+# 1.2: seed / comparability test. warm_epochs = epochs of continued training for the warm start.
 SEED_TEST = {'dataset': 'case1', 'seeds': [42, 43, 44, 45, 46], 'knn': 10, 'knn_sample': 2000,
-             'cross_pairs': 10}
+             'cross_pairs': 10, 'warm_epochs': 10}
 
-# Exp 10: period-level graph distances (C6).
+# 1.3, 1.4, 2.1, 2.2: Antoine's stream loop with three ways of handling the embedding.
+#   original  re-embed from scratch on every new entity (Antoine, as in Phase 1)
+#   aligned   re-embed from scratch, then rotate the new embedding onto the previous one
+#   frozen    embedding trained once, new entities folded in
+# Methods that retrain are slow (a training per new entity), so they get fewer repeats and models.
+STREAM = {
+    'methods': ['original', 'aligned', 'frozen'],
+    'retrain_models': ['TransE'],          # no-drift / injected repeats of the retraining methods use one model
+    'retrain_compositions': ['hadamard'],  #   and one composition (Phase 1: all models and compositions behave alike)
+    'retrain_repeats': 10,                 # no-drift and injected-switch streams each, per retraining method
+    'frozen_repeats': 20,                  # same, for the frozen method (cheap), all models
+}
+
+# 2.6: embedding-quality check. MRR is measured at several training lengths; the key comparisons are
+# repeated with TransE trained for quality_epochs.
+QUALITY = {'dataset': 'case1', 'model': 'TransE', 'epoch_grid': [10, 25, 50, 100, 200], 'quality_epochs': 100,
+           'test_sample': 2000}
+
+# 2.5: graph distances year by year (C6).
 GRAPH = {'deltacon_groups': 10, 'deltacon_iterations': 30, 'permutations': 999}
 
 
 def feature_dim(composition):
     return KGE['real_dim'] * (3 if composition == 'concatenation' else 1)
+
+
+def epochs_suffix(epochs=None):
+    """File/run name suffix for a non-default training length ('' for the Phase 1 default)."""
+    return '' if epochs in (None, KGE['epochs']) else f'__e{epochs}'

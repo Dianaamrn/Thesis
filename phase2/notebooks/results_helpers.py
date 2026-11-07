@@ -24,6 +24,7 @@ METHOD_LABELS = {'original': "Antoine (retrain from scratch)", 'aligned': 'retra
 INK, MUTED, GRID = '#1f1f1e', '#6b6a64', '#e4e3df'
 MODELS = list(MODEL_COLORS)
 SWITCH = {'case1': 2005, 'case2': 2022, 'full': None}
+CUTOFF = {'case1': 2002, 'case2': 2018, 'full': 2010}
 CHANNEL_LABELS = {
     'C1_types': 'triple types',
     'C2_novelty': 'new entities',
@@ -497,6 +498,8 @@ def graph():
             ax.plot(d['year'], d[m], color='#2a78d6', marker='o', markersize=4)
             if SWITCH.get(ds):
                 ax.axvline(SWITCH[ds] - 0.5, color=MUTED, linewidth=1)
+            if CUTOFF.get(ds):
+                ax.axvline(CUTOFF[ds] + 0.5, color=MUTED, linewidth=1, linestyle=':')
             if c is not None:
                 cp = c[(c['dataset'] == ds) & (c['measure'] == m)]
                 if len(cp) and cp['changepoint_year'].notna().all():
@@ -504,7 +507,8 @@ def graph():
             ax.set_title(titles[m], loc='left', fontsize=8)
             ax.set_xlabel('year')
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-        fig.suptitle(f'{ds}: grey = known switch, orange dashed = detected change point', x=0.01, ha='left', fontsize=10)
+        fig.suptitle(f'{ds}: dotted = cutoff (reference period | stream), grey = known switch, '
+                     'orange dashed = detected change point', x=0.01, ha='left', fontsize=10)
         fig.tight_layout()
         plt.show()
     return c

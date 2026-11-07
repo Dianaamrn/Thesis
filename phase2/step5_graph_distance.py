@@ -1,7 +1,10 @@
 """Step 5 (CPU): period-level graph distances -- channel C6 (Experiment 10).
 
 A 250-triple window is a drop in a graph of 330,000 triples, so whole-graph distances are used on a
-slower clock: one graph per publication year of the monitored stream, compared year to year.
+slower clock: one graph per publication year of the monitored triples, compared year to year. The series
+covers the reference period before the cutoff AND the stream after it (the same triple types throughout),
+so the change-point test has enough years on both sides of a switch: with only the stream, CASE1 has a
+single year-to-year comparison before its 2005 switch and the test cannot place a change there.
   disease_jaccard   1 - Jaccard overlap of the diseases studied in year y and year y-1
   wl_distance       total-variation distance between Weisfeiler-Lehman (1 iteration) label histograms
                     of the two yearly graphs; node label = node type (Gene, miRNA, Disease), relation
@@ -119,14 +122,16 @@ def main(argv=None):
     args = p.parse_args(argv)
     cfg = settings.GRAPH
     rng = np.random.default_rng(0)
-    pool = lib_data.load_pool(args.dataset, 'holdout')
-    df = pool[pool['part'].eq('stream') & pool['event_year'].notna()].copy()
+    # 'full' pool = every monitored triple: the whole pre-cutoff period ('initial') and the stream
+    pool = lib_data.load_pool(args.dataset, 'full')
+    df = pool[pool['event_year'].notna()].copy()
     df['event_year'] = df['event_year'].astype(int)
     years = sorted(df['event_year'].unique())
     rows, prev = [], None
     for y in years:
         cur = df[df['event_year'] == y]
-        row = {'year': y, 'triples': len(cur), 'diseases': cur['disease'].nunique()}
+        row = {'year': y, 'period': 'reference' if y <= settings.DATASETS[args.dataset]['cutoff_year'] else 'stream',
+               'triples': len(cur), 'diseases': cur['disease'].nunique()}
         if prev is not None:
             d1, d2 = set(prev['disease']), set(cur['disease'])
             row['disease_jaccard'] = 1 - len(d1 & d2) / len(d1 | d2) if d1 | d2 else np.nan

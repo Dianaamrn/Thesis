@@ -235,7 +235,9 @@ what that means for the no-drift stream length).
 ## 2.5 Graph distances year by year
 
 A 250-triple window is a drop in a graph of 330,000 triples, so whole-graph distances are compared year by
-year, with a change-point test on each series.
+year, with a change-point test on each series. The series covers the reference period before the cutoff and
+the stream after it (same triple types), so the test has enough years on both sides of the switch. Years
+with very few triples give noisy distances; the `triples` column shows how many each year has.
 """),
     ('code', "R.graph()"),
     ('md', """

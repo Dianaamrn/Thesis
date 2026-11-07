@@ -13,6 +13,7 @@ phase1/runs/
 phase1/runs_pilot/
 phase1/analysis/
 phase1/quality/
+phase1/settings_check/
 phase1/*.log
 phase2/outputs/
 .pystow/

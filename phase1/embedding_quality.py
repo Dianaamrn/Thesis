@@ -1,6 +1,6 @@
-"""EXTRA (not part of the skeleton): link-prediction MRR / Hits@10 on the cutoff KG, per model.
+"""Link-prediction MRR / Hits@10 on the cutoff KG, per model, with the settings the runs use.
 
-Shows whether each model learned the graph at the given preset (same dim, epochs, batch size).
+Shows whether each model learned the graph (same dim, learning rate, epochs, batch size as the runs).
 Trains once on 98% of the cutoff KG and scores a sample of the held-out 2% (filtered ranking).
 
     python embedding_quality.py --dataset case1 --models TransE TransH DistMult ComplEx RotatE
@@ -37,15 +37,15 @@ def main():
     from pykeen.training import SLCWATrainingLoop
     from pykeen.triples import TriplesFactory
 
-    cfg = configs.PRESETS[args.preset]
     ds = configs.DATASETS[args.dataset]
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     triples_df = load_temporal_triples(args.data_dir / ds['file'])
     initial_kg, _, _, _ = build_initial_knowledge_graph(triples_df, ds['cutoff_year'], ds['target_type'])
     triples = KnowledgeGraph(initial_kg).triples().astype(str)
     tf = TriplesFactory.from_labeled_triples(triples)
-    train, test = tf.split([0.98, 0.02], random_state=cfg['seed'])
-    rng = np.random.default_rng(cfg['seed'])
+    seed = configs.PRESETS[args.preset]['seed']
+    train, test = tf.split([0.98, 0.02], random_state=seed)
+    rng = np.random.default_rng(seed)
     test_mapped = test.mapped_triples
     if len(test_mapped) > args.test_sample:
         test_mapped = test_mapped[rng.choice(len(test_mapped), args.test_sample, replace=False)]
@@ -53,9 +53,11 @@ def main():
 
     for model_name in args.models:
         started = time.time()
+        cfg = configs.training_settings(args.preset, args.dataset, model_name)
         dim = cfg['real_dim'] // 2 if model_name in configs.COMPLEX_MODELS else cfg['real_dim']
         model = getattr(pykeen_models, model_name)(triples_factory=train, embedding_dim=dim, random_seed=cfg['seed']).to(device)
-        SLCWATrainingLoop(model=model, triples_factory=train).train(
+        SLCWATrainingLoop(model=model, triples_factory=train, optimizer='Adam',
+                          optimizer_kwargs={'lr': cfg['learning_rate']}).train(
             triples_factory=train, num_epochs=cfg['epochs'], batch_size=cfg['batch_size'],
             use_tqdm=False, use_tqdm_batch=False, pin_memory=False, num_workers=0)
         result = RankBasedEvaluator(filtered=True).evaluate(
@@ -63,7 +65,7 @@ def main():
             use_tqdm=False)
         out = {
             'dataset': args.dataset, 'model': model_name, 'preset': args.preset, 'embedding_dim': dim,
-            'epochs': cfg['epochs'], 'n_train': int(train.num_triples), 'n_test_scored': int(len(test_mapped)),
+            'learning_rate': cfg['learning_rate'], 'epochs': cfg['epochs'], 'n_train': int(train.num_triples), 'n_test_scored': int(len(test_mapped)),
             'num_entities': int(tf.num_entities),
             'mrr': float(result.get_metric('both.realistic.inverse_harmonic_mean_rank')),
             'hits_at_10': float(result.get_metric('both.realistic.hits_at_10')),

@@ -1,13 +1,14 @@
 """Run a grid of Phase 1 experiments (meant for tmux on the server).
 
-    python run_grid.py --grid A_cases B_cases --parallel 3
-    python run_grid.py --grid C_cases --parallel 3      # sphere sweep, needs A_cases finished
-    python run_grid.py --grid A_full --dry-run
+    python run_grid.py --grid sphere always --parallel 3
+    python run_grid.py --grid sphere always --datasets full --parallel 3
+    python run_grid.py --grid sweep --parallel 3      # sphere size on case1, needs the case1 sphere runs
+    python run_grid.py --grid sphere --dry-run
 
 Finished runs (summary.json present) are skipped, so the command can be restarted after a
 crash or a lost connection. Each run's console output goes to <out-dir>/_logs/<run>.log.
 
-Sphere sweeps (C_*): for every dataset/model/composition, the block A run's logged
+Sphere sweep: for every model/composition on case1, the sphere run's logged
 center-radius ratios (one per new-entity re-embed) give k values at which the rule would
 have retrained on ~10%, ~50%, ~90% of new entities. Chosen k values are saved to
 <out-dir>/_sweep_plan.csv.
@@ -40,7 +41,7 @@ def sweep_entries(sweep_name, out_dir):
                 base = configs.run_id(dataset, model, composition, 'phase1', 'sphere', 1.0)
                 shift_path = out_dir / base / 'embedding_shift_metrics.tsv'
                 if not (out_dir / base / 'summary.json').exists():
-                    print(f'[sweep] no finished block A run {base}; skipped')
+                    print(f'[sweep] no finished sphere run {base}; skipped')
                     continue
                 shifts = pd.read_csv(shift_path, sep='\t') if shift_path.stat().st_size > 1 else pd.DataFrame()
                 ratios = np.array([])
@@ -55,7 +56,7 @@ def sweep_entries(sweep_name, out_dir):
                     entries.append((dataset, model, composition, 'phase1', 'sphere', k, tag))
                     plan.append({'dataset': dataset, 'model': model, 'composition': composition, 'tag': tag,
                                  'target_retrain_share': share, 'sphere_k': k, 'n_ratios': len(ratios),
-                                 'share_in_block_A': float((ratios > k).mean())})
+                                 'share_in_sphere_run': float((ratios > k).mean())})
     if plan:
         path = out_dir / '_sweep_plan.csv'
         old = pd.read_csv(path) if path.exists() else pd.DataFrame()
@@ -71,6 +72,7 @@ def sweep_entries(sweep_name, out_dir):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--grid', required=True, nargs='+', choices=list(configs.GRIDS) + list(configs.DYNAMIC_SWEEPS))
+    p.add_argument('--datasets', nargs='+', default=None, help='only runs on these datasets')
     p.add_argument('--parallel', type=int, default=1)
     p.add_argument('--threads', type=int, default=None, help='CPU threads per run (default: 8 // parallel)')
     p.add_argument('--data-dir', type=Path, default=HERE.parent / 'data')
@@ -86,6 +88,8 @@ def main():
     for grid in args.grid:
         entries = sweep_entries(grid, args.out_dir) if grid in configs.DYNAMIC_SWEEPS else configs.GRIDS[grid]
         for entry in entries:
+            if args.datasets and entry[0] not in args.datasets:
+                continue
             if entry not in jobs:
                 jobs.append(entry)
 

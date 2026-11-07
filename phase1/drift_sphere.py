@@ -7,7 +7,9 @@ Z-test are the notebook's. What changed, and why:
   1. Model: TransE -> any of TransE, TransH, DistMult, ComplEx, RotatE (`--model`).
      Complex models (ComplEx, RotatE) are turned into real vectors [real parts, imag parts].
   2. Settings come from a preset (configs.PRESETS): 'antoine' = the notebook's constants,
-     'phase1' = 64 real dims, 10 epochs, StandardScaler + gamma='scale'.
+     'phase1' = 64 real dims, StandardScaler + gamma='scale', and a learning rate and number of
+     epochs per dataset and model chosen by early stopping (configs.TRAINING, settings_check.py).
+     The notebook used PyKEEN's default Adam learning rate (0.001) and 2 epochs.
      Retrain policy on a new entity: 'sphere' (Antoine, ratio > k) or 'always' (Diana's reference).
   3. Speed, same numbers: the KG is appended to instead of re-concatenated every step,
      features and the KG bounding box are computed as numpy arrays instead of row loops,
@@ -329,7 +331,8 @@ def generate_embeddings_from_kg(kg, cfg):
     model_cls = getattr(pykeen_models, model_name)
     model = model_cls(triples_factory=triples_factory, embedding_dim=dim, random_seed=cfg['seed'])
     model = model.to(torch.device(cfg['device']))
-    training_loop = SLCWATrainingLoop(model=model, triples_factory=triples_factory)
+    training_loop = SLCWATrainingLoop(model=model, triples_factory=triples_factory,
+                                      optimizer='Adam', optimizer_kwargs={'lr': cfg['learning_rate']})
     training_loop.train(
         triples_factory=triples_factory,
         num_epochs=cfg['epochs'],
@@ -730,7 +733,13 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
 
 def build_config(args):
     cfg = dict(configs.PRESETS[args.preset])
-    for key in ('real_dim', 'epochs', 'batch_size', 'seed', 'window_size', 'nu', 'alpha', 'keep_fraction_after_drift'):
+    try:
+        cfg.update(configs.training_settings(args.preset, args.dataset, args.model))
+    except ValueError:
+        if args.learning_rate is None or args.epochs is None:  # both given on the command line = test run
+            raise
+    for key in ('real_dim', 'learning_rate', 'epochs', 'batch_size', 'seed', 'window_size', 'nu', 'alpha',
+                'keep_fraction_after_drift'):
         value = getattr(args, key)
         if value is not None:
             cfg[key] = value
@@ -799,7 +808,8 @@ def main(argv=None):
     p.add_argument('--no-drift-windows', action='store_true')
     p.add_argument('--overwrite', action='store_true')
     # Optional overrides of the preset.
-    for name, typ in (('real_dim', int), ('epochs', int), ('batch_size', int), ('seed', int), ('window_size', int),
+    for name, typ in (('real_dim', int), ('learning_rate', float), ('epochs', int), ('batch_size', int),
+                      ('seed', int), ('window_size', int),
                       ('nu', float), ('alpha', float), ('keep_fraction_after_drift', float), ('cutoff_year', int)):
         p.add_argument('--' + name.replace('_', '-'), dest=name, type=typ, default=None)
     p.add_argument('--gamma', default=None)
@@ -831,7 +841,7 @@ def main(argv=None):
 
     summary = {'run': name, **{k: cfg[k] for k in ('dataset', 'model', 'composition', 'preset', 'retrain_policy',
                                                   'sphere_k', 'detector', 'cutoff_year', 'switch_year',
-                                                  'epochs', 'real_dim', 'max_stream')},
+                                                  'learning_rate', 'epochs', 'real_dim', 'max_stream')},
                'detector_source': detector_source, 'feature_dim': feature_dim(cfg), **result['summary'],
                'runtime_seconds': time.time() - started, 'versions': versions(),
                'finished_utc': datetime.now(timezone.utc).isoformat()}

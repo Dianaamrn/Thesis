@@ -1,11 +1,13 @@
 # Phase 1: Antoine's sphere rule vs always retraining, with 5 embedding models
 
 Port of `biomedical_ocsvm_ztest_experiment (6).ipynb` (Antoine). The stream loop, the sphere
-(center-radius) retrain rule, keep-10% after drift and the Z-test are his.
+(center-radius) retrain rule, keep-10% after drift and the Z-test are his. As in his notebook, the KG is
+built from every triple up to the cutoff year, and from then on one triple type is monitored:
+**Gene - causes_or_contributes_to_condition - Disease**.
 
 ## How to run (server, inside tmux)
 
-1. `python settings_check.py --dataset case1` (then `case2`, `full`): chooses the learning rate and
+1. `python settings_check.py --dataset case1` (then `full`): chooses the learning rate and
    epochs of every model (see below). Copy the chosen values into `TRAINING` in `configs.py`.
 2. `bash run_phase1.sh`: all runs, MRR, analysis, then `~/phase1_results.tgz`.
 
@@ -29,19 +31,20 @@ gamma 'scale', window 250, alpha 0.025, keep 10% after drift, adazor `ZTestDrift
 
 | Grid | Retrain rule on a new entity | Datasets | Runs |
 |---|---|---|---|
-| `sphere` | Antoine's sphere rule, ratio > 1 | case1, case2, full | 30 |
-| `always` | always retrain the OCSVM | case1, case2, full | 30 |
+| `sphere` | Antoine's sphere rule, ratio > 1 | case1, full | 20 |
+| `always` | always retrain the OCSVM | case1, full | 20 |
 | `sweep` | sphere rule with k set from the `sphere` runs' ratios so it retrains ~10/50/90% of new entities | case1 | 30 |
-| MRR | link-prediction quality per model, with the run settings | case1, case2, full | 15 trainings |
+| MRR | link-prediction quality per model, with the run settings | case1, full | 10 trainings |
 
 Each grid is 5 models (TransE, TransH, DistMult, ComplEx, RotatE) x 2 compositions (hadamard,
 concatenation). After a drift alarm every rule re-embeds and retrains (Antoine's code).
 
 | Dataset | File | Stream | Cutoff | Switch |
 |---|---|---|---|---|
-| `case1` | filtered_drifting_edgesCASE1.tsv | 11 disease types | 2002 | 2005 |
-| `case2` | filtered_drifting_edgesCASE2.tsv | 11 disease types | 2018 | 2022 |
+| `case1` | filtered_drifting_edgesCASE1.tsv | Gene-Disease | 2002 | 2005 (cancer -> infectious disease) |
 | `full` | drifting_edges_timestamp.tsv | Gene-Disease | 2010 | none |
+
+CASE2 (infectious -> cancer, 2022) is not part of Phase 1.
 
 ## Outputs
 

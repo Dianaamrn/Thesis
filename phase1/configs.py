@@ -4,11 +4,14 @@ Everything that differs between runs lives here, so the experiment script itself
 stays a straight port of Antoine's notebook
 (biomedical_ocsvm_ztest_experiment (6).ipynb).
 
+As in the notebook, the KG is built from every triple up to the cutoff year, and from then on
+ONE triple type is monitored: Gene - causes_or_contributes_to_condition - Disease, on case1 and full.
+
 Phase 1 (preset 'phase1'):
-  sphere   Antoine's sphere rule (k = 1)         5 models x 2 compositions x {case1, case2, full}  30 runs
-  always   always retrain the OCSVM on a new entity  5 models x 2 compositions x {case1, case2, full}  30 runs
+  sphere   Antoine's sphere rule (k = 1)             5 models x 2 compositions x {case1, full}  20 runs
+  always   always retrain the OCSVM on a new entity  5 models x 2 compositions x {case1, full}  20 runs
   sweep    sphere size on case1: k chosen from the 'sphere' runs' logged ratios so the rule
-           retrains on ~10%, ~50%, ~90% of new entities      5 models x 2 compositions x 3       30 runs
+           retrains on ~10%, ~50%, ~90% of new entities  5 models x 2 compositions x 3        30 runs
   plus MRR per model and dataset, and the peak analysis (analyze.py).
 After a drift alarm every policy re-embeds and retrains (Antoine's code).
 
@@ -19,41 +22,17 @@ number of epochs, stored in TRAINING below. Every re-embed in a run uses those f
 
 GENE_DISEASE = 'Gene - causes_or_contributes_to_condition - Disease'
 
-# Disease-related triple types (Diana's list). Types missing from a file simply match nothing.
-DISEASE_TYPES = [
-    'Disease - has_material_basis_in_germline_mutation_in - Gene',
-    'Disease - has_material_basis_in_germline_mutation_in - miRNA',
-    'Disease - has_material_basis_in_somatic_mutation_in - miRNA',
-    'Gene - causes_or_contributes_to_condition - Disease',
-    'Gene - is_causal_germline_mutation_in - Disease',
-    'miRNA - causes_or_contributes_to_condition - Disease',
-    'miRNA - expressed_in - Disease',
-    'miRNA - is_causal_germline_mutation_in - Disease',
-    'miRNA - is_causal_somatic_mutation_in - Disease',
-    'miRNA - over_expressed_in - Disease',
-    'miRNA - under_expressed_in - Disease',
-]
-
 # switch_year = first year of the injected drift (None = no known drift).
 # max_stream = stop after this many stream triples (None = whole stream).
 DATASETS = {
-    # The drift in the cases is defined on diseases (cancer <-> infectious), so the stream is
-    # every disease-related triple type. Same stream definition for both cases.
+    # Monitored stream = one triple type (as in Antoine's notebook).
     'case1': {
         'file': 'filtered_drifting_edgesCASE1.tsv',
         'cutoff_year': 2002,
-        'target_type': DISEASE_TYPES,
+        'target_type': GENE_DISEASE,
         'switch_year': 2005,
         'max_stream': None,
-        'note': 'CASE1: cancer before 2005, infectious disease from 2005. Cutoff as in Antoine.',
-    },
-    'case2': {
-        'file': 'filtered_drifting_edgesCASE2.tsv',
-        'cutoff_year': 2018,
-        'target_type': DISEASE_TYPES,
-        'switch_year': 2022,
-        'max_stream': None,
-        'note': 'CASE2: infectious disease before 2022, cancer from 2022 (~70 disease triples up to 2002, so cutoff 2018).',
+        'note': "CASE1: cancer before 2005, infectious disease from 2005. Antoine's cutoff and stream type.",
     },
     'full': {
         'file': 'drifting_edges_timestamp.tsv',
@@ -134,8 +113,8 @@ def _grid(datasets, models=MODELS, compositions=COMPOSITIONS, preset='phase1', p
 
 
 GRIDS = {
-    'sphere': _grid(['case1', 'case2', 'full']),
-    'always': _grid(['case1', 'case2', 'full'], policy='always'),
+    'sphere': _grid(['case1', 'full']),
+    'always': _grid(['case1', 'full'], policy='always'),
     # 'sweep' is built at run time from the finished case1 'sphere' runs (see run_grid.py).
 }
 DYNAMIC_SWEEPS = {

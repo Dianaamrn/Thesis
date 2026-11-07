@@ -124,6 +124,7 @@ def main(argv=None):
     p.add_argument('--control', type=int, default=settings.MONTE_CARLO['control'], help='number of control streams')
     p.add_argument('--inject', type=int, default=settings.MONTE_CARLO['inject'], help='number of injected streams')
     p.add_argument('--workers', type=int, default=4)
+    p.add_argument('--overwrite', action='store_true', help='recompute runs that already exist')
     args = p.parse_args(argv)
 
     out_dir = settings.OUT / 'channels' / args.dataset
@@ -138,7 +139,7 @@ def main(argv=None):
         n = {'real': 1, 'control': args.control, 'inject': args.inject}[sc]
         for rep in range(n):
             f = out_dir / 'runs' / f'{sc}_{rep:03d}.csv'
-            if not f.exists():
+            if args.overwrite or not f.exists():
                 jobs.append((args.dataset, sc, rep, args.channels, args.compositions, f))
     print(f'[{args.dataset}] {len(jobs)} scenario runs to do; models: {list(model_data)}; '
           f'pool {len(pool):,} triples; MONDO: {meta.get("mondo_version")}', flush=True)

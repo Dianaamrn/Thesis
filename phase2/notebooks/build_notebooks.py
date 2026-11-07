@@ -216,7 +216,11 @@ Same streams for all three. *switch_detected* = share of streams with an alarm a
     ('md', """
 ## 2.3 Fair reference and calibrated threshold
 
-Same fixed embedding and OCSVM, statistics changed one step at a time.
+Same fixed embedding and OCSVM, statistics changed one step at a time. The calibrated threshold is found
+by simulating no-drift streams. With only 250 calibration triples, the detector's true no-drift flag rate
+depends on which triples were drawn (Beta distributed around 0.10, Bates et al. 2023), so each simulated
+stream draws its own rate; resampling the one calibration set instead set the threshold too low
+(first server run: 17-29% of no-drift streams with a false alarm against a 7-12% target).
 """),
     ('code', "R.statistics_steps()"),
     ('md', """

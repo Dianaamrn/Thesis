@@ -64,7 +64,9 @@ ALPHA = 0.025                             # Phase 1 alpha, used by the fixed z/s
 KEEP_FRACTION_AFTER_DRIFT = 0.10          # Antoine's refill rule (stream methods)
 
 # Calibrated thresholds: at most BETA chance of any false alarm in HORIZON triples of no-drift data,
-# found by simulating no-drift streams resampled from the calibration half of the reference.
+# found by simulating no-drift streams resampled from the calibration half of the reference. For the
+# conformal OCSVM the simulation also draws the detector's no-drift flag rate from its Beta distribution
+# (calibration-sample variation; lib_detect.conformal_flag_sampler).
 CALIBRATION = {'horizon': 1000, 'beta': 0.10, 'n_boot': 200}
 
 # Monte Carlo: number of no-drift control streams and of injected-switch streams per dataset.

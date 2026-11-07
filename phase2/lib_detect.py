@@ -144,13 +144,33 @@ def conformal_pvalues_loo(cal_scores):
 
 class ChannelInstance:
     """values: per-pool-row values; boot_values: values to resample for calibration (R_cal rows);
-    stat(x) -> (positions, statistic); fixed_threshold or None (= calibrate)."""
+    stat(x) -> (positions, statistic); fixed_threshold or None (= calibrate);
+    null_sampler(rng, length) -> simulated no-drift values, used for calibration instead of resampling
+    boot_values when given."""
 
-    def __init__(self, name, stride, values, boot_values, stat, fixed_threshold=None, info=None):
+    def __init__(self, name, stride, values, boot_values, stat, fixed_threshold=None, info=None, null_sampler=None):
         self.name, self.stride = name, stride
         self.values, self.boot_values, self.stat = values, boot_values, stat
         self.fixed_threshold = fixed_threshold
         self.info = info or {}
+        self.null_sampler = null_sampler
+
+
+def conformal_flag_sampler(m, alpha):
+    """No-drift outlier flags of a conformal detector, including calibration-sample variation.
+
+    With m calibration scores, a new no-drift triple is flagged (p-value <= alpha) with probability
+    q = F(k-th smallest calibration score), k = floor(alpha (m + 1)). q depends on which calibration
+    triples were drawn and is Beta(k, m + 1 - k) distributed (Vovk 2012; Bates et al. 2023,
+    calibration-conditional validity): about 0.10 on average, but from ~0.07 to ~0.14 for m = 250.
+    Resampling the one calibration set we have treats q as exactly alpha, which sets the threshold
+    too low. Each simulated stream therefore draws its own q, then Bernoulli(q) flags."""
+    k = max(1, int(np.floor(alpha * (m + 1))))
+
+    def sample(rng, length):
+        q = rng.beta(k, m + 1 - k)
+        return (rng.random(length) < q).astype(np.int8)
+    return sample
 
 
 def fixed_ztest_threshold(alpha=settings.ALPHA):
@@ -214,11 +234,13 @@ def build_channels(pool_data, model_data, ref_fit, ref_cal, models, compositions
                 pv = conformal_pvalues(s_all, s_all[ref_cal])
                 flags = (pv <= nu).astype(np.int8)
                 boot = (conformal_pvalues_loo(s_all[ref_cal]) <= nu).astype(np.int8)
+                sampler = conformal_flag_sampler(len(ref_cal), nu)
                 for name, thr in (('C5_conformal_fixed', fixed_ztest_threshold()), ('C5_conformal_calibrated', None)):
                     if name in want:
                         out.append(ChannelInstance(f'{name}|{model}|{comp}', 1, flags, boot,
                                                    lambda x, s: stat_rate(x, s, nu), fixed_threshold=thr,
-                                                   info={'reference_rate': nu}))
+                                                   info={'reference_rate': nu},
+                                                   null_sampler=sampler if thr is None else None))
     return out
 
 
@@ -227,15 +249,19 @@ def build_channels(pool_data, model_data, ref_fit, ref_cal, models, compositions
 # ---------------------------------------------------------------------------
 
 def calibrate(ch, rng, horizon=None, beta=None, n_boot=None):
-    """Threshold with P(any alarm within `horizon` no-drift triples) = beta, by resampling R_cal."""
+    """Threshold with P(any alarm within `horizon` no-drift triples) = beta, from simulated no-drift streams:
+    resampled from R_cal, or drawn from the channel's null_sampler when it has one."""
     c = settings.CALIBRATION
     horizon, beta = horizon or c['horizon'], beta or c['beta']
     n_boot = n_boot or settings.CHANNELS.get(ch.name.split('|')[0], {}).get('n_boot', c['n_boot'])
     maxima = np.empty(n_boot)
     length = horizon + N - 1
     for b in range(n_boot):
-        idx = rng.integers(0, len(ch.boot_values), length)
-        _, s = ch.stat(ch.boot_values[idx], ch.stride)
+        if ch.null_sampler is not None:
+            x = ch.null_sampler(rng, length)
+        else:
+            x = ch.boot_values[rng.integers(0, len(ch.boot_values), length)]
+        _, s = ch.stat(x, ch.stride)
         maxima[b] = s.max()
     return float(np.quantile(maxima, 1 - beta))
 

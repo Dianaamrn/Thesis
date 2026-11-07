@@ -1,7 +1,8 @@
 """Choose the learning rate and number of epochs for every model, with one rule for all models.
 
 Rule (PyKEEN's own early-stopping defaults, with MRR as the measure):
-  - train on 98% of the dataset's cutoff KG, keep 2% for validation (same split as embedding_quality.py);
+  - split the dataset's cutoff KG 96/2/2 into train / validation / test (same split as embedding_quality.py);
+    settings are chosen on validation only; the test part is kept for embedding_quality.py;
   - every 10 epochs compute the validation MRR (filtered ranking);
   - stop when 2 checks in a row do not improve the best MRR by at least 1%, or at --max-epochs;
   - do this for each learning rate; the chosen setting is the learning rate with the best MRR,
@@ -35,7 +36,7 @@ from drift_sphere import KnowledgeGraph, build_initial_knowledge_graph, load_tem
 PASS_FACTOR = 10  # chosen MRR must be >= PASS_FACTOR x random MRR
 
 
-def check_one(model_name, lr, train, test, test_mapped, train_sample, num_entities, args, device):
+def check_one(model_name, lr, train, known, test_mapped, train_sample, num_entities, args, device):
     import pykeen.models as pykeen_models
     import torch
     from pykeen.evaluation import RankBasedEvaluator
@@ -57,7 +58,6 @@ def check_one(model_name, lr, train, test, test_mapped, train_sample, num_entiti
                    pin_memory=False, num_workers=0)
         train_seconds += time.time() - t0
         done = target
-        known = [train.mapped_triples, test.mapped_triples]
         result = evaluator.evaluate(model, test_mapped, additional_filter_triples=known, use_tqdm=False)
         fit = evaluator.evaluate(model, train_sample, additional_filter_triples=known, use_tqdm=False)
         mrr = float(result.get_metric('both.realistic.inverse_harmonic_mean_rank'))
@@ -121,7 +121,7 @@ def main():
     triples_df = load_temporal_triples(args.data_dir / ds['file'])
     initial_kg, _, _, _ = build_initial_knowledge_graph(triples_df, ds['cutoff_year'], ds['target_type'])
     tf = TriplesFactory.from_labeled_triples(KnowledgeGraph(initial_kg).triples().astype(str))
-    train, test = tf.split([0.98, 0.02], random_state=seed)
+    train, test, _held_out_test = tf.split([0.96, 0.02, 0.02], random_state=seed)  # 'test' here = validation
     rng = np.random.default_rng(seed)
     test_mapped = test.mapped_triples
     if len(test_mapped) > args.test_sample:
@@ -140,7 +140,8 @@ def main():
                 print(f'[skip] {path.name}', flush=True)
                 continue
             print(f'[start] {args.dataset} {model_name} lr={lr:g}  ({time.strftime("%H:%M:%S")})', flush=True)
-            res = check_one(model_name, lr, train, test, test_mapped, train_sample, tf.num_entities, args, device)
+            known = [train.mapped_triples, test.mapped_triples, _held_out_test.mapped_triples]  # filtered ranking
+            res = check_one(model_name, lr, train, known, test_mapped, train_sample, tf.num_entities, args, device)
             res.update({'dataset': args.dataset, 'num_entities': int(tf.num_entities),
                         'n_train': int(train.num_triples), 'n_validation': int(len(test_mapped)),
                         'max_epochs': args.max_epochs, 'frequency': args.frequency, 'patience': args.patience,

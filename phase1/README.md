@@ -12,10 +12,10 @@ Port of `biomedical_ocsvm_ztest_experiment (6).ipynb` (Antoine). The stream loop
 ## Embedding training: one rule for all models
 
 Every model is trained with the same procedure, PyKEEN's early stopping on validation MRR:
-train on 98% of the cutoff KG, check the MRR on the other 2% every 10 epochs, stop after 2 checks
+split the cutoff KG 96/2/2 (train / validation / test), check the validation MRR every 10 epochs, stop after 2 checks
 without a 1% improvement (max 100 epochs), for learning rates 0.001, 0.01 and 0.05. Each model keeps
 the learning rate with the best MRR and the epochs where it was reached. A model passes if its MRR is
-at least 10 x random guessing. Every re-embed in a run then uses these fixed values.
+at least 10 x random guessing. The reported MRR (`embedding_quality.py`) uses the test part, never used for choosing. Every re-embed in a run then uses these fixed values.
 
 Why: with one fixed setting for all models (PyKEEN's default learning rate 0.001, 10 epochs),
 ComplEx learned nothing (MRR at the level of random guessing). Those earlier runs are archived

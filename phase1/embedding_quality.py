@@ -1,7 +1,8 @@
 """Link-prediction MRR / Hits@10 on the cutoff KG, per model, with the settings the runs use.
 
 Shows whether each model learned the graph (same dim, learning rate, epochs, batch size as the runs).
-Trains once on 98% of the cutoff KG and scores a sample of the held-out 2% (filtered ranking).
+Same 96/2/2 split as settings_check.py: trains on 96%, scores a sample of the test 2%, which was
+not used to choose the learning rate and epochs (filtered ranking).
 
     python embedding_quality.py --dataset case1 --models TransE TransH DistMult ComplEx RotatE
 """
@@ -44,7 +45,7 @@ def main():
     triples = KnowledgeGraph(initial_kg).triples().astype(str)
     tf = TriplesFactory.from_labeled_triples(triples)
     seed = configs.PRESETS[args.preset]['seed']
-    train, test = tf.split([0.98, 0.02], random_state=seed)
+    train, validation, test = tf.split([0.96, 0.02, 0.02], random_state=seed)
     rng = np.random.default_rng(seed)
     test_mapped = test.mapped_triples
     if len(test_mapped) > args.test_sample:
@@ -61,7 +62,7 @@ def main():
             triples_factory=train, num_epochs=cfg['epochs'], batch_size=cfg['batch_size'],
             use_tqdm=False, use_tqdm_batch=False, pin_memory=False, num_workers=0)
         result = RankBasedEvaluator(filtered=True).evaluate(
-            model, test_mapped, additional_filter_triples=[train.mapped_triples, test.mapped_triples],
+            model, test_mapped, additional_filter_triples=[train.mapped_triples, validation.mapped_triples, test.mapped_triples],
             use_tqdm=False)
         out = {
             'dataset': args.dataset, 'model': model_name, 'preset': args.preset, 'embedding_dim': dim,

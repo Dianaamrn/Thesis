@@ -71,13 +71,17 @@ the learning rate with the best MRR and the epochs where it was reached. The rep
 - `warm_check/`: warm-start measurements per dataset and model; `<dataset>__table.csv`
 - `<runs folder>/<run>/`: summary.json, config.json, drifts.tsv, window_history.tsv.gz, step_trace.tsv.gz,
   embedding_shift_metrics.tsv (one row per re-embed, with the sphere ratio), progress.json
+  step_trace has one row per stream triple. Rows with `refill = True` are the triples that refill the
+  window after an alarm; the method does not test them. Their `shadow_*` columns record what the OCSVM in
+  use at the alarm says about them (logging only: the alarms are the same with or without it).
 - `<runs folder>/_sweep_plan.csv`: the sphere sizes chosen for Rule 3
 - `quality/`: MRR per dataset and model (`__phase1` = v1 settings, `__v2` = 20 epochs)
 - `analysis/summary_table.csv|.md`: one row per run (alarms, re-embeds, retrains, false alarms, delay,
   peaks, density, MRR); `analysis/version_comparison.csv|.md`: the versions side by side
 - `analysis/peaks/<run>.csv`, `analysis/peaks_all.csv`: one row per peak (date, file row, triple,
   disease name and group, triples with the same date, distance to the switch and to the highest peak)
-- `analysis/figures/`: one outlier-rate plot per run with alarms and peaks, alarm positions vs the switch,
+- `analysis/figures/`: one outlier-rate plot per run with alarms, peaks and the untested refill stretches
+  (light blue), alarm positions vs the switch,
   retrain share vs false alarms / delay per rule
 
 ## Files

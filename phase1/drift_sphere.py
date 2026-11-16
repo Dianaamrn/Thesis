@@ -24,6 +24,8 @@ Z-test are the notebook's. What changed, and why:
      random vector, and trains a few epochs over the whole KG).
   7. Retrain policy 'every' (`--retrain-every X`): the OCSVM is fitted again after every X stream
      triples, on the same reference triples (as the sphere rule does), with the current embedding.
+  8. Shadow logging of the refill triples (step_trace rows with refill = True): what the OCSVM in use
+     at the alarm says about the triples that refill the window and are not tested. Logging only.
 
 Retrain rule (notebook): when a triple brings an unseen entity or relation, the KG is
 re-embedded from scratch; the new triple's feature vector is compared with the box of all
@@ -604,6 +606,35 @@ def rebuild_reference_after_drift(reference_rows, kg, state, cfg, drift_row, pro
     return state, boundary, shift_record
 
 
+def shadow_refill_records(rows, indices, iteration, state, ocsvm, scaler, detector, window_flags, cfg):
+    """Logging only. After an alarm the next triples refill the window and the method does not test
+    them. This records what the OCSVM and the detector in use at the alarm say about them:
+      shadow_scorable          the triple's entities all have a vector in the current embedding
+      shadow_outlier           the OCSVM's flag for the triple (empty if not scorable)
+      shadow_outlier_fraction  outlier share of the window if it had kept sliding over the scorable triples
+      shadow_would_alarm       the detector's answer for that window
+    Nothing here is used by the run: alarms, re-embeds and retrains are the same with or without it."""
+    if not rows:
+        return []
+    scorable = np.array([str(r['subject']) in state.entity_index and str(r['object']) in state.entity_index
+                         and str(r['edge_type']) in state.relation_index for r in rows], dtype=bool)
+    flags = np.full(len(rows), np.nan)
+    if scorable.any():
+        X = rows_to_features([r for r, ok in zip(rows, scorable) if ok], state, cfg['composition'])
+        flags[scorable] = outlier_flags(ocsvm, scaler, X)
+    window = deque((bool(f) for f in window_flags), maxlen=cfg['window_size'])
+    records = []
+    for row, index, ok, flag in zip(rows, indices, scorable, flags):
+        if ok:
+            window.append(bool(flag))
+        records.append({**_row_meta(row, index, iteration), 'subject': row['subject'], 'edge_type': row['edge_type'],
+                        'object': row['object'], 'drift_tested': False, 'drift_detected': False, 'refill': True,
+                        'shadow_scorable': bool(ok), 'shadow_outlier': flag,
+                        'shadow_outlier_fraction': float(np.mean(window)),
+                        'shadow_would_alarm': bool(detector.detect(list(window)))})
+    return records
+
+
 def should_retrain(shift_record, cfg):
     policy = cfg['retrain_policy']
     if policy == 'sphere':
@@ -658,6 +689,8 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
     vectors_changed = False      # a re-embed happened since then
     scheduled_retrain_count = 0  # times the schedule was reached
     scheduled_refit_count = 0    # of those, times the OCSVM was really fitted again
+    refill_count = 0             # untested refill triples after alarms
+    refill_scorable_count = 0    # of those, triples the old embedding could score (shadow logging)
 
     def handle_shift(row, shift_record):
         nonlocal ocsvm, scaler, reference_flags, threshold_retrain_count, triples_since_fit, vectors_changed
@@ -707,7 +740,7 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
         scheduled = handle_schedule(shift_record)
         current_window.append(row)
         step_records.append({**_row_meta(row, i, iteration), 'drift_tested': False, 'drift_detected': False,
-                             'reembedded': has_unseen, 'sphere_retrained': retrained, 'scheduled_retrain': scheduled,
+                             'refill': False, 'reembedded': has_unseen, 'sphere_retrained': retrained, 'scheduled_retrain': scheduled,
                              'reference_outlier_fraction': np.nan, 'current_outlier_fraction': np.nan,
                              'embedding_kg_rows': int(state.kg_rows)})
         progress.write('warmup', i, 0, len(shift_records), unseen_elements_count_all)
@@ -740,7 +773,7 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
                    'embedding_kg_rows': int(state.kg_rows)}
         window_history.append(history)
         step_records.append({**history, 'subject': row['subject'], 'edge_type': row['edge_type'],
-                             'object': row['object'], 'drift_tested': True})
+                             'object': row['object'], 'drift_tested': True, 'refill': False})
         progress.write('monitor', i, len(drift_records), len(shift_records), unseen_elements_count_all)
 
         if not is_drift:
@@ -764,13 +797,22 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
         # Keep 10% of the drifted window, refill from the stream (no re-embed during refill).
         keep_count = max(1, int(round(window_size * cfg['keep_fraction_after_drift'])))
         rebuilt_rows = window_rows[-min(keep_count, len(window_rows)):]
+        refill_rows, refill_indices = [], []
         while len(rebuilt_rows) < window_size and i < total:
             next_row = future_records[i]
             i += 1
             unseen_elements_count_all += int(triple_has_unseen_elements(next_row, lookup))
             kg, lookup = update_knowledge_graph(kg, next_row, lookup)
             rebuilt_rows.append(next_row)
+            refill_rows.append(next_row)
+            refill_indices.append(i)
             progress.write('rebuild', i, len(drift_records), len(shift_records), unseen_elements_count_all)
+        # Logging only (before the re-embed and the refit): the old OCSVM's view of the untested refill triples.
+        refill_records = shadow_refill_records(refill_rows, refill_indices, iteration, state, ocsvm, scaler,
+                                               detector, current_flags, cfg)
+        step_records.extend(refill_records)
+        refill_count += len(refill_records)
+        refill_scorable_count += sum(r['shadow_scorable'] for r in refill_records)
 
         reference_rows = rebuilt_rows
         state, boundary, drift_shift = rebuild_reference_after_drift(reference_rows, kg, state, cfg, row, progress, iteration)
@@ -806,6 +848,8 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
         'num_threshold_retrains': int(threshold_retrain_count),
         'num_scheduled_retrains': int(scheduled_retrain_count),
         'num_scheduled_refits': int(scheduled_refit_count),
+        'num_refill_triples': int(refill_count),
+        'num_refill_scorable': int(refill_scorable_count),
         'unseen_retrain_ratio': float(n_unseen_retrain / n_unseen_refresh) if n_unseen_refresh else 0.0,
         'num_center_radius_outside_boundary': int(unseen['threshold_exceeded_center_radius'].sum()) if n_unseen_refresh else 0,
         'initial_embedding_seconds': float(initial_embedding_seconds),

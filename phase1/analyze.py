@@ -17,6 +17,11 @@ distance of one window, plus the curve's maximum if it lies at an end):
   triples_from_highest, days_from_highest      distance to the highest peak
 The curve only has points at tested triples (the 225 refill triples after an alarm are not tested).
 
+Refill triples (shadow logging in drift_sphere.py, runs from 2026-11-16 on): the plot shows, in light
+blue, what the OCSVM in use at the alarm says about them; the table has
+  refill_scorable_share   share of refill triples whose entities all had a vector
+  refill_outlier_share    share of the scorable refill triples that this OCSVM calls outliers
+
 Definitions (stream_index = position in the target-type stream after the cutoff; refill rows
 after an alarm count too, so distances are in stream triples):
   switch_index        first tested triple with event_year >= the case's switch year
@@ -279,13 +284,23 @@ def sphere_metrics(shifts):
     return out
 
 
-def plot_run(name, history, shifts, switch_index, out_path, peaks=None, label_top=10):
+def plot_run(name, history, shifts, switch_index, out_path, peaks=None, label_top=10, refill=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(11, 4))
-    ax.plot(history['stream_index'], history['current_outlier_fraction'], lw=1, color='#3b6ea5', label='current outlier fraction')
-    ax.plot(history['stream_index'], history['reference_outlier_fraction'], lw=1, color='#999999', label='reference outlier fraction')
+    if refill is not None and not refill.empty:
+        # Shadow logging: the untested refill triples, seen by the OCSVM that was in use at the alarm.
+        ax.scatter(refill['stream_index'], refill['shadow_outlier_fraction'], s=2, color='#9ecae1',
+                   label='not tested (refill), old OCSVM')
+    # The lines are broken where triples were not tested, so a gap is not drawn as a straight line.
+    x = history['stream_index'].to_numpy(dtype=float)
+    gap = np.flatnonzero(np.diff(x) > 1) + 1
+    x = np.insert(x, gap, np.nan)
+    ax.plot(x, np.insert(history['current_outlier_fraction'].to_numpy(dtype=float), gap, np.nan),
+            lw=1, color='#3b6ea5', label='current outlier fraction')
+    ax.plot(x, np.insert(history['reference_outlier_fraction'].to_numpy(dtype=float), gap, np.nan),
+            lw=1, color='#999999', label='reference outlier fraction')
     alarms = history[history['drift_detected'].astype(bool)]
     ax.scatter(alarms['stream_index'], alarms['current_outlier_fraction'], color='#c0392b', s=14, zorder=3, label='alarm')
     if peaks is not None and not peaks.empty:
@@ -294,7 +309,10 @@ def plot_run(name, history, shifts, switch_index, out_path, peaks=None, label_to
         for _, pk in peaks.head(label_top).iterrows():
             ax.annotate(f"{int(pk['rank'])}: {pk['date']}", (pk['stream_index'], pk['outlier_rate']),
                         textcoords='offset points', xytext=(0, 7), ha='center', fontsize=6, color='#a04000')
-        ax.set_ylim(top=float(history['current_outlier_fraction'].max()) * 1.25 + 0.02)   # room for the labels
+        highest = float(history['current_outlier_fraction'].max())
+        if refill is not None and not refill.empty:
+            highest = max(highest, float(refill['shadow_outlier_fraction'].max()))
+        ax.set_ylim(top=highest * 1.25 + 0.02)   # room for the labels
     if not shifts.empty:
         unseen = shifts[shifts['trigger_reason'].eq('unseen_element')]
         ymin = -0.03
@@ -305,9 +323,9 @@ def plot_run(name, history, shifts, switch_index, out_path, peaks=None, label_to
     ax.set_xlabel('stream triple')
     ax.set_ylabel('outlier fraction')
     ax.set_title(name, fontsize=9)
-    ax.legend(fontsize=7, loc='upper left')
+    ax.legend(fontsize=7, loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0)   # beside the plot
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140)
+    fig.savefig(out_path, dpi=140, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -425,7 +443,8 @@ def main():
                                            'feature_dim', 'future_rows', 'processed_future_triples',
                                            'tested_steps', 'num_detected_drifts', 'num_unseen_refresh_events',
                                            'num_drift_refresh_events', 'num_threshold_retrains',
-                                           'num_scheduled_retrains', 'num_scheduled_refits', 'unseen_retrain_ratio',
+                                           'num_scheduled_retrains', 'num_scheduled_refits',
+                                           'num_refill_triples', 'num_refill_scorable', 'unseen_retrain_ratio',
                                            'initial_reference_outlier_fraction', 'runtime_seconds')}
         row['version'] = summary.get('version') or 'v1'   # runs made before the versions existed are v1
         row['policy_tag'] = summary['run'].split('__')[3]
@@ -436,6 +455,14 @@ def main():
         row.update(peak_metrics(history, switch_index, window))
         row.update(sphere_metrics(shifts))
         trace = pd.read_csv(run_dir / 'step_trace.tsv.gz', sep='\t')
+        # Refill triples with shadow logging (runs made before 2026-11-16 do not have them).
+        refill = trace[trace['refill'].fillna(False).astype(bool)] if 'refill' in trace else pd.DataFrame()
+        if not refill.empty:
+            scored = refill[refill['shadow_scorable'].astype(bool)]
+            row['refill_scorable_share'] = float(len(scored) / len(refill))
+            row['refill_outlier_share'] = float(scored['shadow_outlier'].mean()) if len(scored) else np.nan
+            if switch_index is not None and switch_year is not None:
+                row['refill_triples_from_switch_year'] = int((refill['event_year'] >= switch_year).sum())
         trace = trace[trace['drift_tested'].astype(bool)]
         peaks = peak_table(trace, switch_index, window, mondo, same_date_counts(args.data_dir, config))
         row.update(peak_summary(peaks))
@@ -452,7 +479,7 @@ def main():
                                 'offset_from_switch': int(a - switch_index)})
         if not args.no_plots:
             plot_run(summary['run'], history, shifts, switch_index, args.out / 'figures' / f'{summary["run"]}.png',
-                     peaks=peaks)
+                     peaks=peaks, refill=refill)
 
     table = pd.DataFrame(rows)
     if table.empty:

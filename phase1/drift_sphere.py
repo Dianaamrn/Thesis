@@ -18,6 +18,12 @@ Z-test are the notebook's. What changed, and why:
      `target_type` may be a list of types.
   5. Extra logging for the analysis (stream index, event year, re-embed / retrain flags,
      embedding time). The final KG is not saved (it is the input file up to the end).
+  6. Versions (`--version`, configs.VERSIONS): how the KG is re-embedded. v1 = from scratch with the
+     chosen epochs, v2 = from scratch with 20 epochs, v3 = warm start (the first embedding is trained
+     as in v1; every later re-embed starts from the previous vectors, a new entity from PyKEEN's
+     random vector, and trains a few epochs over the whole KG).
+  7. Retrain policy 'every' (`--retrain-every X`): the OCSVM is fitted again after every X stream
+     triples, on the same reference triples (as the sphere rule does), with the current embedding.
 
 Retrain rule (notebook): when a triple brings an unseen entity or relation, the KG is
 re-embedded from scratch; the new triple's feature vector is compared with the box of all
@@ -274,6 +280,7 @@ class EmbeddingState:
     dim: int
     kg_rows: int
     train_seconds: float
+    raw: dict | None = None        # warm start only: the model's own weights, to start the next re-embed from
 
 
 def normalize_rows(matrix):
@@ -310,10 +317,48 @@ def _predicate_embeddings_from_translation(triples, entity_index, entity_matrix,
     return normalize_rows(out)
 
 
-def generate_embeddings_from_kg(kg, cfg):
-    """Train a PyKEEN model from scratch on the current KG (notebook: generate_transe_embeddings_from_kg)."""
+def _model_weights(model, triples_factory):
+    """The model's own weight tables (not normalised), with the labels of their rows."""
+    def tables(representations):
+        out = []
+        for rep in representations:
+            if not hasattr(rep, '_embeddings'):
+                raise NotImplementedError('warm start needs plain embedding tables')
+            out.append(rep._embeddings.weight.detach().cpu().numpy().copy())
+        return out
+    return {
+        'entity_labels': sorted(triples_factory.entity_to_id, key=triples_factory.entity_to_id.get),
+        'relation_labels': sorted(triples_factory.relation_to_id, key=triples_factory.relation_to_id.get),
+        'entity': tables(model.entity_representations),
+        'relation': tables(model.relation_representations),
+    }
+
+
+def _copy_previous_weights(model, triples_factory, raw):
+    """Warm start: every entity and relation the previous model knew gets its previous weights
+    (matched by label). New ones keep the random start PyKEEN gave them."""
+    import torch
+    for representations, labels, new_ids, old_tables in (
+            (model.entity_representations, raw['entity_labels'], triples_factory.entity_to_id, raw['entity']),
+            (model.relation_representations, raw['relation_labels'], triples_factory.relation_to_id, raw['relation'])):
+        old_rows = [i for i, label in enumerate(labels) if label in new_ids]
+        new_rows = torch.tensor([new_ids[labels[i]] for i in old_rows], dtype=torch.long)
+        for rep, old in zip(representations, old_tables):
+            weight = rep._embeddings.weight
+            with torch.no_grad():
+                weight.data[new_rows.to(weight.device)] = torch.as_tensor(old[old_rows]).to(weight.device, weight.dtype)
+
+
+def generate_embeddings_from_kg(kg, cfg, previous=None):
+    """Train a PyKEEN model on the current KG (notebook: generate_transe_embeddings_from_kg).
+
+    From scratch (notebook, versions v1 and v2): a new model, cfg['epochs'] epochs.
+    Warm start (version v3, when a previous embedding is given): the new model starts from the
+    previous model's weights and trains cfg['warm_epochs'] epochs over the whole KG.
+    """
+    warm = cfg.get('embed_update') == 'warm' and previous is not None and previous.raw is not None
     if cfg['embedder'] == 'random':
-        return _random_embeddings(kg, cfg)
+        return _random_embeddings(kg, cfg, previous if warm else None)
 
     import pykeen.models as pykeen_models
     import torch
@@ -331,11 +376,17 @@ def generate_embeddings_from_kg(kg, cfg):
     model_cls = getattr(pykeen_models, model_name)
     model = model_cls(triples_factory=triples_factory, embedding_dim=dim, random_seed=cfg['seed'])
     model = model.to(torch.device(cfg['device']))
+    if warm:
+        _copy_previous_weights(model, triples_factory, previous.raw)
+        # PyKEEN re-initialises every weight at the start of train(); switch that off so the copied
+        # weights are kept (new entities keep the random start they got when the model was built).
+        model.reset_parameters_ = lambda *args, **kwargs: model
+    learning_rate = cfg['warm_learning_rate'] if warm else cfg['learning_rate']
     training_loop = SLCWATrainingLoop(model=model, triples_factory=triples_factory,
-                                      optimizer='Adam', optimizer_kwargs={'lr': cfg['learning_rate']})
+                                      optimizer='Adam', optimizer_kwargs={'lr': learning_rate})
     training_loop.train(
         triples_factory=triples_factory,
-        num_epochs=cfg['epochs'],
+        num_epochs=cfg['warm_epochs'] if warm else cfg['epochs'],
         batch_size=min(cfg['batch_size'], max(32, len(triples))),
         use_tqdm=False,
         use_tqdm_batch=False,
@@ -355,6 +406,7 @@ def generate_embeddings_from_kg(kg, cfg):
             raise ValueError('relation dim differs from entity dim')
     except Exception:
         relation_matrix = _predicate_embeddings_from_translation(triples.astype(str), entity_index, entity_matrix, relation_labels)
+    raw = _model_weights(model, triples_factory) if cfg.get('embed_update') == 'warm' else None
 
     del model, training_loop
     if cfg['device'].startswith('cuda'):
@@ -367,24 +419,34 @@ def generate_embeddings_from_kg(kg, cfg):
         dim=entity_matrix.shape[1],
         kg_rows=len(kg),
         train_seconds=time.time() - started,
+        raw=raw,
     )
 
 
-def _random_embeddings(kg, cfg):
-    """Smoke-test embedder: random unit vectors, new ones on every call (like a from-scratch re-embed)."""
+def _random_embeddings(kg, cfg, previous=None):
+    """Smoke-test embedder: random unit vectors, new ones on every call (like a from-scratch re-embed).
+    With a previous embedding (warm start) the known entities and relations keep their vectors."""
     triples = kg.triples().astype(str)
     rng = np.random.default_rng(cfg['seed'] + len(kg))
     entities = sorted(set(triples[:, 0]).union(triples[:, 2]))
     relations = sorted(set(triples[:, 1]))
     d = cfg['real_dim']
+    entity_matrix = normalize_rows(rng.normal(size=(len(entities), d)))
+    relation_matrix = normalize_rows(rng.normal(size=(len(relations), d)))
+    if previous is not None:
+        for labels, matrix, old_index, old_matrix in ((entities, entity_matrix, previous.entity_index, previous.entity_matrix),
+                                                      (relations, relation_matrix, previous.relation_index, previous.relation_matrix)):
+            known = [i for i, label in enumerate(labels) if label in old_index]
+            matrix[known] = old_matrix[[old_index[labels[i]] for i in known]]
     return EmbeddingState(
         entity_index={e: i for i, e in enumerate(entities)},
-        entity_matrix=normalize_rows(rng.normal(size=(len(entities), d))),
+        entity_matrix=entity_matrix,
         relation_index={r: i for i, r in enumerate(relations)},
-        relation_matrix=normalize_rows(rng.normal(size=(len(relations), d))),
+        relation_matrix=relation_matrix,
         dim=d,
         kg_rows=len(kg),
         train_seconds=0.0,
+        raw={} if cfg.get('embed_update') == 'warm' else None,
     )
 
 
@@ -520,7 +582,7 @@ def process_triple_for_features(row, kg, lookup, state, boundary, cfg, progress,
     pre_unseen_boundary = boundary
     kg, lookup = update_knowledge_graph(kg, row, lookup)
     progress.write('reembedding_unseen_start', iteration, detail='training on updated KG')
-    state = generate_embeddings_from_kg(kg, cfg)
+    state = generate_embeddings_from_kg(kg, cfg, previous=state)
     vec = rows_to_features([row], state, cfg['composition'])[0]
     shift_record = {'trigger_reason': 'unseen_element', 'is_drift': False, 'retrained_ocsvm': False,
                     'embedding_kg_rows': int(len(kg)), 'train_seconds': state.train_seconds}
@@ -533,7 +595,7 @@ def process_triple_for_features(row, kg, lookup, state, boundary, cfg, progress,
 
 def rebuild_reference_after_drift(reference_rows, kg, state, cfg, drift_row, progress, iteration):
     progress.write('reembedding_drift_start', iteration, detail='training after drift')
-    state = generate_embeddings_from_kg(kg, cfg)
+    state = generate_embeddings_from_kg(kg, cfg, previous=state)
     shift_record = {'trigger_reason': 'drift', 'is_drift': True, 'retrained_ocsvm': True,
                     'embedding_kg_rows': int(len(kg)), 'train_seconds': state.train_seconds}
     drift_vec = rows_to_features([drift_row], state, cfg['composition'])[0]
@@ -548,7 +610,7 @@ def should_retrain(shift_record, cfg):
         return bool(shift_record['threshold_exceeded_center_radius'])
     if policy == 'always':
         return True
-    if policy == 'never':
+    if policy in ('never', 'every'):  # 'every' refits on its own schedule, not at a new entity
         return False
     raise ValueError(policy)
 
@@ -591,20 +653,47 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
     unseen_elements_count_all = 0
     i = 0
     iteration = 0
+    # Policy 'every': counters since the OCSVM was last fitted.
+    triples_since_fit = 0        # stream triples seen since then
+    vectors_changed = False      # a re-embed happened since then
+    scheduled_retrain_count = 0  # times the schedule was reached
+    scheduled_refit_count = 0    # of those, times the OCSVM was really fitted again
 
     def handle_shift(row, shift_record):
-        nonlocal ocsvm, scaler, reference_flags, threshold_retrain_count
+        nonlocal ocsvm, scaler, reference_flags, threshold_retrain_count, triples_since_fit, vectors_changed
         retrained = False
         if shift_record is not None and should_retrain(shift_record, cfg):
             _, ocsvm, scaler, reference_flags = retrain_reference_model(reference_rows, state, cfg, detector)
             shift_record['retrained_ocsvm'] = True
             threshold_retrain_count += 1
             retrained = True
+            triples_since_fit, vectors_changed = 0, False
+        elif shift_record is not None:
+            vectors_changed = True
         if shift_record is not None:
             shift_record.update(_row_meta(row, i, iteration))
             shift_record.update({'subject': row['subject'], 'edge_type': row['edge_type'], 'object': row['object']})
             shift_records.append(shift_record)
         return retrained
+
+    def handle_schedule(shift_record):
+        """Policy 'every': after every X stream triples fit the OCSVM again on the same reference
+        triples with the current embedding. If no re-embed happened since the last fit, the same
+        triples and the same vectors would give the same OCSVM, so the fit is not repeated."""
+        nonlocal ocsvm, scaler, reference_flags, triples_since_fit, vectors_changed
+        nonlocal scheduled_retrain_count, scheduled_refit_count
+        triples_since_fit += 1
+        if cfg['retrain_policy'] != 'every' or triples_since_fit < cfg['retrain_every']:
+            return False
+        scheduled_retrain_count += 1
+        triples_since_fit = 0
+        if vectors_changed:
+            _, ocsvm, scaler, reference_flags = retrain_reference_model(reference_rows, state, cfg, detector)
+            scheduled_refit_count += 1
+            vectors_changed = False
+            if shift_record is not None:
+                shift_record['retrained_ocsvm'] = True
+        return True
 
     # Warm-up (only runs if the initial stream was shorter than the window).
     while len(current_window) < window_size and i < total:
@@ -615,9 +704,10 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
             row, kg, lookup, state, boundary, cfg, progress, iteration)
         unseen_elements_count_all += int(has_unseen)
         retrained = handle_shift(row, shift_record)
+        scheduled = handle_schedule(shift_record)
         current_window.append(row)
         step_records.append({**_row_meta(row, i, iteration), 'drift_tested': False, 'drift_detected': False,
-                             'reembedded': has_unseen, 'sphere_retrained': retrained,
+                             'reembedded': has_unseen, 'sphere_retrained': retrained, 'scheduled_retrain': scheduled,
                              'reference_outlier_fraction': np.nan, 'current_outlier_fraction': np.nan,
                              'embedding_kg_rows': int(state.kg_rows)})
         progress.write('warmup', i, 0, len(shift_records), unseen_elements_count_all)
@@ -631,6 +721,7 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
             row, kg, lookup, state, boundary, cfg, progress, iteration)
         unseen_elements_count_all += int(has_unseen)
         retrained = handle_shift(row, shift_record)
+        scheduled = handle_schedule(shift_record)
         current_window.append(row)
 
         window_rows = list(current_window)
@@ -644,6 +735,7 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
         history = {**meta, 'window_size': len(window_rows), 'reference_size': int(len(reference_flags)),
                    'reference_outlier_fraction': reference_fraction, 'current_outlier_fraction': current_fraction,
                    'drift_detected': is_drift, 'reembedded': has_unseen, 'sphere_retrained': retrained,
+                   'scheduled_retrain': scheduled,
                    'center_radius_ratio': shift_record['center_radius_ratio'] if shift_record else np.nan,
                    'embedding_kg_rows': int(state.kg_rows)}
         window_history.append(history)
@@ -687,6 +779,7 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
         shift_records.append(drift_shift)
         current_window = deque(reference_rows[-min(window_size, len(reference_rows)):], maxlen=window_size)
         _, ocsvm, scaler, reference_flags = retrain_reference_model(reference_rows, state, cfg, detector)
+        triples_since_fit, vectors_changed = 0, False
 
     progress.write('finished', i, len(drift_records), len(shift_records), unseen_elements_count_all, force=True)
 
@@ -711,6 +804,8 @@ def run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, 
         'num_unseen_refresh_events': n_unseen_refresh,
         'num_drift_refresh_events': int(len(shift_df) - n_unseen_refresh),
         'num_threshold_retrains': int(threshold_retrain_count),
+        'num_scheduled_retrains': int(scheduled_retrain_count),
+        'num_scheduled_refits': int(scheduled_refit_count),
         'unseen_retrain_ratio': float(n_unseen_retrain / n_unseen_refresh) if n_unseen_refresh else 0.0,
         'num_center_radius_outside_boundary': int(unseen['threshold_exceeded_center_radius'].sum()) if n_unseen_refresh else 0,
         'initial_embedding_seconds': float(initial_embedding_seconds),
@@ -738,11 +833,28 @@ def build_config(args):
     except ValueError:
         if args.learning_rate is None or args.epochs is None:  # both given on the command line = test run
             raise
+    version = configs.VERSIONS[args.version]
+    if version['epochs'] is not None:
+        cfg['epochs'] = version['epochs']
     for key in ('real_dim', 'learning_rate', 'epochs', 'batch_size', 'seed', 'window_size', 'nu', 'alpha',
                 'keep_fraction_after_drift'):
         value = getattr(args, key)
         if value is not None:
             cfg[key] = value
+    cfg.update({'version': args.version, 'embed_update': version['embed_update'],
+                'warm_epochs': None, 'warm_learning_rate': None})
+    if version['embed_update'] == 'warm':
+        if args.warm_epochs is not None and args.warm_learning_rate is not None:  # both given = test run
+            warm = {'warm_epochs': args.warm_epochs, 'warm_learning_rate': args.warm_learning_rate}
+        else:
+            warm = configs.warm_settings(args.dataset, args.model)
+            if args.warm_epochs is not None:
+                warm['warm_epochs'] = args.warm_epochs
+            if args.warm_learning_rate is not None:
+                warm['warm_learning_rate'] = args.warm_learning_rate
+        cfg.update(warm)
+    if args.retrain_policy == 'every' and (args.retrain_every is None or args.retrain_every < 1):
+        raise ValueError("--retrain-policy every needs --retrain-every X (X >= 1)")
     if args.gamma is not None:
         cfg['gamma'] = args.gamma if args.gamma in ('scale', 'auto') else float(args.gamma)
     if args.standardize is not None:
@@ -769,6 +881,7 @@ def build_config(args):
         'preset': args.preset,
         'retrain_policy': args.retrain_policy,
         'sphere_k': args.sphere_k,
+        'retrain_every': args.retrain_every if args.retrain_policy == 'every' else None,
         'detector': args.detector,
         'embedder': args.embedder,
         'device': device,
@@ -795,11 +908,16 @@ def main(argv=None):
     p.add_argument('--model', default='TransE', choices=configs.MODELS)
     p.add_argument('--composition', default='hadamard', choices=configs.COMPOSITIONS)
     p.add_argument('--preset', default='phase1', choices=list(configs.PRESETS))
-    p.add_argument('--retrain-policy', default='sphere', choices=['sphere', 'always', 'never'])
+    p.add_argument('--version', default='v1', choices=list(configs.VERSIONS),
+                   help='how the KG is re-embedded: v1 scratch (chosen epochs), v2 scratch (20 epochs), v3 warm start')
+    p.add_argument('--retrain-policy', default='sphere', choices=['sphere', 'always', 'never', 'every'])
     p.add_argument('--sphere-k', type=float, default=1.0)
+    p.add_argument('--retrain-every', type=int, default=None, help="policy 'every': stream triples between OCSVM fits")
+    p.add_argument('--warm-epochs', type=int, default=None, help='v3: epochs of one warm re-embed (default configs.WARM)')
+    p.add_argument('--warm-learning-rate', type=float, default=None, help='v3: learning rate of a warm re-embed')
     p.add_argument('--detector', default='ztest', choices=['ztest', 'biomedical'])
     p.add_argument('--data-dir', type=Path, default=Path(__file__).resolve().parent.parent / 'data')
-    p.add_argument('--out-dir', type=Path, default=Path(__file__).resolve().parent / 'runs')
+    p.add_argument('--out-dir', type=Path, default=None, help="default: the version's folder (runs, runs_v2, runs_v3)")
     p.add_argument('--adazor-src', type=Path, default=Path(__file__).resolve().parent.parent / 'adazor' / 'src')
     p.add_argument('--device', default='auto')
     p.add_argument('--embedder', default='pykeen', choices=['pykeen', 'random'], help='random = smoke test only')
@@ -818,8 +936,10 @@ def main(argv=None):
 
     cfg = build_config(args)
     name = args.run_name or configs.run_id(args.dataset, args.model, args.composition, args.preset,
-                                           args.retrain_policy, args.sphere_k)
-    run_dir = args.out_dir / name
+                                           args.retrain_policy, args.sphere_k, version=args.version,
+                                           retrain_every=args.retrain_every)
+    out_dir = args.out_dir or Path(__file__).resolve().parent / configs.VERSIONS[args.version]['runs_dir']
+    run_dir = out_dir / name
     if (run_dir / 'summary.json').exists() and not args.overwrite:
         print(f'[skip] {name} already finished')
         return 0
@@ -840,8 +960,9 @@ def main(argv=None):
     result = run_stream(initial_kg, initial_stream, future_stream, lookup, cfg, run_dir, detector)
 
     summary = {'run': name, **{k: cfg[k] for k in ('dataset', 'model', 'composition', 'preset', 'retrain_policy',
-                                                  'sphere_k', 'detector', 'cutoff_year', 'switch_year',
-                                                  'learning_rate', 'epochs', 'real_dim', 'max_stream')},
+                                                  'sphere_k', 'retrain_every', 'detector', 'cutoff_year', 'switch_year',
+                                                  'version', 'embed_update', 'learning_rate', 'epochs',
+                                                  'warm_epochs', 'warm_learning_rate', 'real_dim', 'max_stream')},
                'detector_source': detector_source, 'feature_dim': feature_dim(cfg), **result['summary'],
                'runtime_seconds': time.time() - started, 'versions': versions(),
                'finished_utc': datetime.now(timezone.utc).isoformat()}

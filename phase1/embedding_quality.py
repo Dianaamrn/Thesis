@@ -27,6 +27,8 @@ def main():
     p.add_argument('--dataset', required=True, choices=list(configs.DATASETS))
     p.add_argument('--models', nargs='+', default=configs.MODELS, choices=configs.MODELS)
     p.add_argument('--preset', default='phase1', choices=list(configs.PRESETS))
+    p.add_argument('--version', default='v1', choices=['v1', 'v2'],
+                   help='v1: the chosen epochs; v2: 20 epochs for every model (v3 starts from the v1 embedding)')
     p.add_argument('--data-dir', type=Path, default=HERE.parent / 'data')
     p.add_argument('--out-dir', type=Path, default=HERE / 'quality')
     p.add_argument('--test-sample', type=int, default=2000)
@@ -55,6 +57,8 @@ def main():
     for model_name in args.models:
         started = time.time()
         cfg = configs.training_settings(args.preset, args.dataset, model_name)
+        if configs.VERSIONS[args.version]['epochs'] is not None:
+            cfg['epochs'] = configs.VERSIONS[args.version]['epochs']
         dim = cfg['real_dim'] // 2 if model_name in configs.COMPLEX_MODELS else cfg['real_dim']
         model = getattr(pykeen_models, model_name)(triples_factory=train, embedding_dim=dim, random_seed=cfg['seed']).to(device)
         SLCWATrainingLoop(model=model, triples_factory=train, optimizer='Adam',
@@ -73,7 +77,8 @@ def main():
             'random_mrr_approx': float(np.log(tf.num_entities) / tf.num_entities),
             'seconds': time.time() - started,
         }
-        (args.out_dir / f'{args.dataset}__{model_name}__{args.preset}.json').write_text(json.dumps(out, indent=2))
+        suffix = args.preset if args.version == 'v1' else configs.VERSIONS[args.version]['tag']
+        (args.out_dir / f'{args.dataset}__{model_name}__{suffix}.json').write_text(json.dumps(out, indent=2))
         print(json.dumps(out), flush=True)
         del model
         if device.type == 'cuda':

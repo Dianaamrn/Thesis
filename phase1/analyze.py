@@ -1,8 +1,21 @@
-"""Phase 1 analysis: one table row per run, peak diagnosis on the known-drift cases, plots.
+"""Analysis: one table row per run, peak analysis, plots, comparison of the versions.
 
-    python analyze.py --runs runs --out analysis
+    python analyze.py                                  # every version folder that exists
+    python analyze.py --runs runs runs_v3 --out analysis
 
-Writes analysis/summary_table.csv (+ .md), analysis/figures/*.png.
+Writes analysis/summary_table.csv (+ .md), analysis/version_comparison.csv (+ .md),
+analysis/peaks_all.csv and analysis/peaks/<run>.csv (one row per peak), analysis/figures/*.png.
+
+Peak table (one row per peak of the outlier-rate curve; peaks = scipy find_peaks with a minimum
+distance of one window, plus the curve's maximum if it lies at an end):
+  rank                  1 = highest peak
+  date, row_number      the stream triple at the peak: its date and its row in the data file
+  subject, object       the triple; disease_name / disease_group (cancer, infectious, other) from MONDO
+  triples_same_date     stream triples of the monitored type with the same date
+  alarm_here            the detector raised an alarm at this triple
+  triples_from_switch, days_from_switch        distance to the switch (cases only; negative = before)
+  triples_from_highest, days_from_highest      distance to the highest peak
+The curve only has points at tested triples (the 225 refill triples after an alarm are not tested).
 
 Definitions (stream_index = position in the target-type stream after the cutoff; refill rows
 after an alarm count too, so distances are in stream triples):
@@ -25,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +48,11 @@ try:
     from scipy.signal import find_peaks
 except ImportError:  # pragma: no cover
     find_peaks = None
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import configs  # noqa: E402
+
+VERSION_FOLDERS = list(configs.VERSIONS.values())
 
 
 def load_run(run_dir):
@@ -78,6 +97,140 @@ def peak_metrics(history, switch_index, window):
             out['pre_switch_mean_outlier_rate'] = float(curve[pre].mean())
         if (idx >= switch_index).any():
             out['post_switch_mean_outlier_rate'] = float(curve[idx >= switch_index].mean())
+    return out
+
+
+def to_date(timestamp):
+    """Stream timestamps are seconds since 1970; returns a pandas Timestamp (NaT if missing)."""
+    return pd.to_datetime(pd.to_numeric(timestamp, errors='coerce'), unit='s', errors='coerce')
+
+
+class Mondo:
+    """Disease names and the two groups of the cases (cancer, infectious) from data/mondo.obo."""
+
+    GROUPS = {'cancer or benign tumor': 'cancer', 'infectious disease': 'infectious'}
+
+    def __init__(self, path):
+        self.parents, self.names, self._memo = {}, {}, {}
+        term = None
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if line == '[Term]':
+                    term = ''
+                elif line.startswith('['):
+                    term = None
+                elif term == '' and line.startswith('id: '):
+                    term = line[4:].strip()
+                    self.parents.setdefault(term, [])
+                elif term:
+                    if line.startswith('name: '):
+                        self.names[term] = line[6:].strip()
+                    elif line.startswith('is_a: '):
+                        self.parents[term].append(line[6:].split('!')[0].strip().split(' ')[0])
+        self.group_terms = {t: self.GROUPS[n] for t, n in self.names.items() if n in self.GROUPS}
+
+    def ancestors(self, term):
+        if term not in self._memo:
+            seen, stack = set(), [term]
+            while stack:
+                x = stack.pop()
+                if x not in seen:
+                    seen.add(x)
+                    stack.extend(self.parents.get(x, []))
+            self._memo[term] = seen
+        return self._memo[term]
+
+    def describe(self, subject, obj):
+        """(disease id, name, group) of a triple; the disease is the MONDO term among object / subject."""
+        for x in (obj, subject):
+            x = str(x)
+            if 'MONDO_' in x:
+                term = 'MONDO:' + x.rsplit('MONDO_', 1)[1]
+                groups = sorted({g for t, g in self.group_terms.items() if t in self.ancestors(term)})
+                return term, self.names.get(term, ''), '+'.join(groups) if groups else 'other'
+        return '', '', ''
+
+
+_SAME_DATE_CACHE = {}
+
+
+def same_date_counts(data_dir, config):
+    """{timestamp (float): number of stream triples of the monitored type with that timestamp}."""
+    key = (config.get('data_file'), str(config.get('target_type')))
+    if key not in _SAME_DATE_CACHE:
+        counts = {}
+        path = Path(data_dir) / str(config.get('data_file'))
+        if data_dir is not None and path.exists():
+            df = pd.read_csv(path, sep='\t', usecols=['timestamp', 'type'], low_memory=False)
+            target = config['target_type']
+            mask = df['type'].isin(target) if isinstance(target, list) else df['type'].eq(target)
+            counts = pd.to_numeric(df.loc[mask, 'timestamp'], errors='coerce').dropna().value_counts().to_dict()
+        _SAME_DATE_CACHE[key] = counts
+    return _SAME_DATE_CACHE[key]
+
+
+def peak_table(trace, switch_index, window, mondo=None, date_counts=None):
+    """One row per peak of the outlier-rate curve, highest first. trace = tested steps of step_trace."""
+    if trace.empty or find_peaks is None:
+        return pd.DataFrame()
+    trace = trace.reset_index(drop=True)
+    curve = trace['current_outlier_fraction'].to_numpy()
+    peaks, props = find_peaks(curve, distance=max(1, window), prominence=0) if len(curve) > 2 else (np.array([], int), {'prominences': np.array([])})
+    prominence = dict(zip(peaks.tolist(), props['prominences'].tolist()))
+    top = int(np.argmax(curve))
+    positions = sorted(set(peaks.tolist()) | {top}, key=lambda j: (-curve[j], j))
+    rows = trace.iloc[positions].copy()
+    out = pd.DataFrame({
+        'rank': np.arange(1, len(positions) + 1),
+        'outlier_rate': curve[positions],
+        'prominence': [prominence.get(j, np.nan) for j in positions],
+        'stream_index': rows['stream_index'].to_numpy(),
+        'row_number': rows['row_number'].to_numpy(),
+        'date': to_date(rows['timestamp']).dt.strftime('%Y-%m-%d').to_numpy(),
+        'event_year': rows['event_year'].to_numpy(),
+        'subject': rows['subject'].to_numpy(),
+        'object': rows['object'].to_numpy(),
+        'alarm_here': rows['drift_detected'].astype(bool).to_numpy(),
+    })
+    if mondo is not None:
+        described = [mondo.describe(s, o) for s, o in zip(out['subject'], out['object'])]
+        out['disease_id'] = [d[0] for d in described]
+        out['disease_name'] = [d[1] for d in described]
+        out['disease_group'] = [d[2] for d in described]
+    if date_counts:
+        ts = pd.to_numeric(rows['timestamp'], errors='coerce').to_numpy()
+        out['triples_same_date'] = [date_counts.get(t, np.nan) for t in ts]
+    dates = to_date(rows['timestamp']).to_numpy()
+    if switch_index is not None:
+        at_switch = trace[trace['stream_index'].eq(switch_index)]
+        switch_date = to_date(at_switch['timestamp']).iloc[0] if len(at_switch) else pd.NaT
+        out['triples_from_switch'] = out['stream_index'] - switch_index
+        out['days_from_switch'] = [(d - switch_date).days if pd.notna(d) and pd.notna(switch_date) else np.nan
+                                   for d in pd.to_datetime(dates)]
+    out['triples_from_highest'] = out['stream_index'] - out['stream_index'].iloc[0]
+    first_date = pd.to_datetime(dates[0])
+    out['days_from_highest'] = [(d - first_date).days if pd.notna(d) and pd.notna(first_date) else np.nan
+                                for d in pd.to_datetime(dates)]
+    return out
+
+
+def peak_summary(peaks):
+    """Columns for the run table: the highest and second-highest peak and the distance between them."""
+    out = {'n_peaks': int(len(peaks))}
+    if peaks.empty:
+        return out
+    out['highest_peak_date'] = peaks['date'].iloc[0]
+    if len(peaks) > 1:
+        second = peaks.iloc[1]
+        out.update({'second_peak_stream_index': int(second['stream_index']), 'second_peak_date': second['date'],
+                    'highest_to_second_triples': int(second['triples_from_highest']),
+                    'highest_to_second_days': second['days_from_highest']})
+        if 'triples_from_switch' in peaks:
+            out.update({'switch_to_second_peak': int(second['triples_from_switch']),
+                        'switch_to_second_peak_days': second['days_from_switch']})
+    if 'days_from_switch' in peaks:
+        out['switch_to_peak_days'] = peaks['days_from_switch'].iloc[0]
     return out
 
 
@@ -126,7 +279,7 @@ def sphere_metrics(shifts):
     return out
 
 
-def plot_run(name, history, shifts, switch_index, out_path):
+def plot_run(name, history, shifts, switch_index, out_path, peaks=None, label_top=10):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -135,6 +288,13 @@ def plot_run(name, history, shifts, switch_index, out_path):
     ax.plot(history['stream_index'], history['reference_outlier_fraction'], lw=1, color='#999999', label='reference outlier fraction')
     alarms = history[history['drift_detected'].astype(bool)]
     ax.scatter(alarms['stream_index'], alarms['current_outlier_fraction'], color='#c0392b', s=14, zorder=3, label='alarm')
+    if peaks is not None and not peaks.empty:
+        ax.scatter(peaks['stream_index'], peaks['outlier_rate'], marker='v', s=34, facecolors='none',
+                   edgecolors='#e67e22', linewidths=1.2, zorder=4, label='peak (number = rank by height)')
+        for _, pk in peaks.head(label_top).iterrows():
+            ax.annotate(f"{int(pk['rank'])}: {pk['date']}", (pk['stream_index'], pk['outlier_rate']),
+                        textcoords='offset points', xytext=(0, 7), ha='center', fontsize=6, color='#a04000')
+        ax.set_ylim(top=float(history['current_outlier_fraction'].max()) * 1.25 + 0.02)   # room for the labels
     if not shifts.empty:
         unseen = shifts[shifts['trigger_reason'].eq('unseen_element')]
         ymin = -0.03
@@ -180,10 +340,14 @@ def plot_alarm_density(offsets_df, fig_dir, bin_width=250):
 def load_quality(quality_dir):
     if quality_dir is None or not Path(quality_dir).exists():
         return pd.DataFrame()
-    rows = [json.loads(f.read_text()) for f in Path(quality_dir).glob('*__phase1.json')]
+    rows = []
+    for f in Path(quality_dir).glob('*.json'):
+        row = json.loads(f.read_text())
+        row['quality_of'] = f.stem.split('__')[-1]   # 'phase1' (v1 settings) or 'v2' (20 epochs)
+        rows.append(row)
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows)[['dataset', 'model', 'mrr', 'hits_at_10']]
+    return pd.DataFrame(rows)[['dataset', 'model', 'quality_of', 'mrr', 'hits_at_10']]
 
 
 def plot_policy_tradeoff(table, fig_dir):
@@ -215,17 +379,40 @@ def plot_policy_tradeoff(table, fig_dir):
         plt.close(fig)
 
 
+def version_comparison(table):
+    """Rows = dataset, model, composition, rule; columns = the versions, for the alarm counts and the delay.
+    One run per cell, nothing is averaged."""
+    values = [c for c in ('num_detected_drifts', 'alarms_pre', 'alarms_post', 'detection_delay') if c in table]
+    wide = table.pivot_table(index=['dataset', 'model', 'composition', 'policy_tag'], columns='version',
+                             values=values, aggfunc='first')
+    wide.columns = [f'{value}__{version}' for value, version in wide.columns]
+    return wide.reset_index()
+
+
 def main():
+    here = Path(__file__).resolve().parent
     p = argparse.ArgumentParser()
-    p.add_argument('--runs', type=Path, default=Path('runs'))
+    p.add_argument('--runs', type=Path, nargs='+', default=None,
+                   help='run folders (default: runs, runs_v2, runs_v3 next to this script, those that exist)')
     p.add_argument('--out', type=Path, default=Path('analysis'))
     p.add_argument('--quality', type=Path, default=Path('quality'), help='folder with embedding_quality.py outputs')
+    p.add_argument('--data-dir', type=Path, default=here.parent / 'data',
+                   help='data files, for the number of stream triples that share a date (skipped if missing)')
+    p.add_argument('--mondo', type=Path, default=here.parent / 'data' / 'mondo.obo',
+                   help='MONDO ontology, for disease names and groups (skipped if missing)')
     p.add_argument('--no-plots', action='store_true')
     args = p.parse_args()
     (args.out / 'figures').mkdir(parents=True, exist_ok=True)
+    (args.out / 'peaks').mkdir(parents=True, exist_ok=True)
+    run_folders = args.runs or [here / v['runs_dir'] for v in VERSION_FOLDERS if (here / v['runs_dir']).exists()]
+    mondo = Mondo(args.mondo) if args.mondo.exists() else None
+    if mondo is None:
+        print(f'no MONDO file at {args.mondo}: peak tables have no disease names')
 
-    rows, offsets = [], []
-    for run_dir in sorted(d for d in args.runs.iterdir() if (d / 'summary.json').exists()):
+    rows, offsets, all_peaks = [], [], []
+    run_dirs = sorted((d for folder in run_folders for d in folder.iterdir() if (d / 'summary.json').exists()),
+                      key=lambda d: d.name)
+    for run_dir in run_dirs:
         summary, config, history, shifts = load_run(run_dir)
         window = int(config['window_size'])
         switch_year = config.get('switch_year')
@@ -234,10 +421,13 @@ def main():
             after = history.loc[history['event_year'] >= switch_year, 'stream_index']
             switch_index = int(after.iloc[0]) if len(after) else None
         row = {k: summary.get(k) for k in ('run', 'dataset', 'model', 'composition', 'preset', 'retrain_policy',
-                                           'sphere_k', 'feature_dim', 'future_rows', 'processed_future_triples',
+                                           'sphere_k', 'retrain_every', 'epochs', 'warm_epochs',
+                                           'feature_dim', 'future_rows', 'processed_future_triples',
                                            'tested_steps', 'num_detected_drifts', 'num_unseen_refresh_events',
-                                           'num_drift_refresh_events', 'num_threshold_retrains', 'unseen_retrain_ratio',
+                                           'num_drift_refresh_events', 'num_threshold_retrains',
+                                           'num_scheduled_retrains', 'num_scheduled_refits', 'unseen_retrain_ratio',
                                            'initial_reference_outlier_fraction', 'runtime_seconds')}
+        row['version'] = summary.get('version') or 'v1'   # runs made before the versions existed are v1
         row['policy_tag'] = summary['run'].split('__')[3]
         row['switch_index'] = switch_index
         row['mean_reference_outlier_rate'] = float(history['reference_outlier_fraction'].mean()) if len(history) else np.nan
@@ -245,6 +435,14 @@ def main():
         row.update(alarm_metrics(history, shifts, switch_index, window))
         row.update(peak_metrics(history, switch_index, window))
         row.update(sphere_metrics(shifts))
+        trace = pd.read_csv(run_dir / 'step_trace.tsv.gz', sep='\t')
+        trace = trace[trace['drift_tested'].astype(bool)]
+        peaks = peak_table(trace, switch_index, window, mondo, same_date_counts(args.data_dir, config))
+        row.update(peak_summary(peaks))
+        if not peaks.empty:
+            peaks.to_csv(args.out / 'peaks' / f'{summary["run"]}.csv', index=False)
+            ident = {k: row[k] for k in ('run', 'dataset', 'version', 'model', 'composition', 'policy_tag')}
+            all_peaks.append(peaks.assign(**ident)[list(ident) + list(peaks.columns)])
         rows.append(row)
         if switch_index is not None:
             for a in history.loc[history['drift_detected'].astype(bool), 'stream_index']:
@@ -253,20 +451,33 @@ def main():
                                 'alarm_stream_index': int(a),
                                 'offset_from_switch': int(a - switch_index)})
         if not args.no_plots:
-            plot_run(summary['run'], history, shifts, switch_index, args.out / 'figures' / f'{summary["run"]}.png')
+            plot_run(summary['run'], history, shifts, switch_index, args.out / 'figures' / f'{summary["run"]}.png',
+                     peaks=peaks)
 
     table = pd.DataFrame(rows)
     if table.empty:
-        print('no finished runs found in', args.runs)
+        print('no finished runs found in', [str(f) for f in run_folders])
         return
+    if all_peaks:
+        pd.concat(all_peaks, ignore_index=True).to_csv(args.out / 'peaks_all.csv', index=False)
     table['runtime_min'] = (table.pop('runtime_seconds') / 60).round(1)
     quality = load_quality(args.quality)
     if not quality.empty:
+        # MRR of the embedding the run starts from: v2 has its own (20 epochs); v1 and v3 share v1's.
         table['quality_dataset'] = table['dataset'].replace({'full_short': 'full'})
-        table = table.merge(quality, how='left', left_on=['quality_dataset', 'model'], right_on=['dataset', 'model'],
-                            suffixes=('', '_q')).drop(columns=['quality_dataset', 'dataset_q'])
-    table = table.sort_values(['dataset', 'model', 'composition', 'policy_tag']).reset_index(drop=True)
+        table['quality_of'] = np.where(table['version'].eq('v2'), 'v2', 'phase1')
+        table = table.merge(quality, how='left', left_on=['quality_dataset', 'model', 'quality_of'],
+                            right_on=['dataset', 'model', 'quality_of'],
+                            suffixes=('', '_q')).drop(columns=['quality_dataset', 'dataset_q', 'quality_of'])
+    table = table.sort_values(['dataset', 'version', 'model', 'composition', 'policy_tag']).reset_index(drop=True)
     table.to_csv(args.out / 'summary_table.csv', index=False)
+    if table['version'].nunique() > 1:
+        comparison = version_comparison(table)
+        comparison.to_csv(args.out / 'version_comparison.csv', index=False)
+        try:
+            (args.out / 'version_comparison.md').write_text(comparison.round(3).to_markdown(index=False), encoding='utf-8')
+        except ImportError:  # tabulate not installed
+            (args.out / 'version_comparison.md').write_text(comparison.round(3).to_string(index=False), encoding='utf-8')
     offsets_df = pd.DataFrame(offsets)
     if not offsets_df.empty:
         offsets_df.to_csv(args.out / 'alarm_offsets.csv', index=False)
@@ -274,11 +485,13 @@ def main():
             plot_alarm_density(offsets_df, args.out / 'figures')
     if not args.no_plots:
         plot_policy_tradeoff(table, args.out / 'figures')
-    key_cols = [c for c in ['dataset', 'model', 'composition', 'policy_tag', 'sphere_k', 'mrr', 'num_detected_drifts',
+    key_cols = [c for c in ['dataset', 'version', 'model', 'composition', 'policy_tag', 'sphere_k', 'mrr',
+                            'num_detected_drifts',
                             'alarms_pre', 'alarms_post', 'false_alarms_per_1000', 'last_false_alarm_before_switch',
-                            'detection_delay', 'switch_to_peak',
-                            'peak_vs_second', 'density_pre', 'density_post', 'num_unseen_refresh_events',
-                            'num_threshold_retrains', 'unseen_retrain_ratio', 'alarms_after_reembed_share',
+                            'detection_delay', 'switch_to_peak', 'switch_to_second_peak', 'highest_to_second_triples',
+                            'peak_vs_second', 'n_peaks', 'density_pre', 'density_post', 'num_unseen_refresh_events',
+                            'num_threshold_retrains', 'num_scheduled_refits', 'unseen_retrain_ratio',
+                            'alarms_after_reembed_share',
                             'mean_reference_outlier_rate', 'mean_current_outlier_rate', 'runtime_min'] if c in table]
     try:
         md = table[key_cols].round(3).to_markdown(index=False)

@@ -15,6 +15,9 @@ phase1/analysis/
 phase1/quality/
 phase1/settings_check/
 phase1/runs_2epochs/
+phase1/runs_v2/
+phase1/runs_v3/
+phase1/warm_check/
 phase1/notebook_cache/
 phase1/*.log
 phase2/outputs/

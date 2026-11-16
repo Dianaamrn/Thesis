@@ -1,17 +1,21 @@
-"""Run a grid of Phase 1 experiments (meant for tmux on the server).
+"""Run a grid of experiments for one version (meant for tmux on the server).
 
-    python run_grid.py --grid sphere always --parallel 3
-    python run_grid.py --grid sphere always --datasets full --parallel 3
-    python run_grid.py --grid sweep --parallel 3      # sphere size on case1, needs the case1 sphere runs
-    python run_grid.py --grid sphere --dry-run
+    python run_grid.py --version v1 --grid sphere always --parallel 3
+    python run_grid.py --version v3 --grid sphere always --datasets case1 case2 --parallel 3
+    python run_grid.py --version v3 --grid sweep every --parallel 3   # sweep needs the version's always runs
+    python run_grid.py --version v2 --grid sphere --dry-run
+
+Version = how the KG is re-embedded (configs.VERSIONS). Grid = retraining rule (configs.RULES):
+sphere (Rule 1), always (Rule 2), sweep (Rule 3, smaller sphere sizes), every (Rule 4, every X triples).
+Without --datasets each rule runs on the datasets planned for the version (configs.PLAN).
 
 Finished runs (summary.json present) are skipped, so the command can be restarted after a
 crash or a lost connection. Each run's console output goes to <out-dir>/_logs/<run>.log.
 
-Sphere sweep: for every model/composition on case1, the sphere run's logged
-center-radius ratios (one per new-entity re-embed) give k values at which the rule would
-have retrained on ~10%, ~50%, ~90% of new entities. Chosen k values are saved to
-<out-dir>/_sweep_plan.csv.
+Sphere sweep: for every dataset and composition, the center-radius ratios logged by the version's
+five always-retrain runs (one ratio per new-entity re-embed, five models pooled) give the k values
+at which the rule would have retrained on ~10%, ~50%, ~90% of new entities. The chosen k values are
+saved to <out-dir>/_sweep_plan.csv.
 """
 from __future__ import annotations
 
@@ -30,80 +34,97 @@ sys.path.insert(0, str(HERE))
 import configs  # noqa: E402
 
 MIN_RATIOS_FOR_SWEEP = 5
+PRESET = 'phase1'
 
 
-def sweep_entries(sweep_name, out_dir):
-    spec = configs.DYNAMIC_SWEEPS[sweep_name]
+def entry_name(entry, version):
+    return configs.run_id(entry['dataset'], entry['model'], entry['composition'], PRESET, entry['policy'],
+                          entry['k'], entry['tag'], version=version, retrain_every=entry['retrain_every'])
+
+
+def sweep_entries(version, datasets, out_dir):
     entries, plan = [], []
-    for dataset in spec['datasets']:
-        for model in spec['models']:
-            for composition in configs.COMPOSITIONS:
-                base = configs.run_id(dataset, model, composition, 'phase1', 'sphere', 1.0)
+    for dataset in datasets:
+        for composition in configs.COMPOSITIONS:
+            ratios, missing = [], []
+            for model in configs.MODELS:
+                base = configs.run_id(dataset, model, composition, PRESET, 'always', 1.0, version=version)
                 shift_path = out_dir / base / 'embedding_shift_metrics.tsv'
                 if not (out_dir / base / 'summary.json').exists():
-                    print(f'[sweep] no finished sphere run {base}; skipped')
+                    missing.append(base)
                     continue
                 shifts = pd.read_csv(shift_path, sep='\t') if shift_path.stat().st_size > 1 else pd.DataFrame()
-                ratios = np.array([])
                 if not shifts.empty:
                     unseen = shifts[shifts['trigger_reason'].eq('unseen_element')]
-                    ratios = unseen['center_radius_ratio'].replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
-                if len(ratios) < MIN_RATIOS_FOR_SWEEP:
-                    print(f'[sweep] {base}: only {len(ratios)} re-embed ratios; skipped')
-                    continue
-                for tag, share in configs.SWEEP_TARGETS.items():
-                    k = float(np.quantile(ratios, 1.0 - share))
-                    entries.append((dataset, model, composition, 'phase1', 'sphere', k, tag))
-                    plan.append({'dataset': dataset, 'model': model, 'composition': composition, 'tag': tag,
-                                 'target_retrain_share': share, 'sphere_k': k, 'n_ratios': len(ratios),
-                                 'share_in_sphere_run': float((ratios > k).mean())})
+                    ratios += unseen['center_radius_ratio'].replace([np.inf, -np.inf], np.nan).dropna().tolist()
+            if missing:
+                print(f'[sweep] {dataset} {composition}: always runs not finished ({len(missing)} of '
+                      f'{len(configs.MODELS)}), e.g. {missing[0]}; skipped')
+                continue
+            ratios = np.asarray(ratios)
+            if len(ratios) < MIN_RATIOS_FOR_SWEEP:
+                print(f'[sweep] {dataset} {composition}: only {len(ratios)} re-embed ratios; skipped')
+                continue
+            for tag, share in configs.SWEEP_TARGETS.items():
+                k = float(np.quantile(ratios, 1.0 - share))
+                entries += [{'dataset': dataset, 'model': model, 'composition': composition, 'policy': 'sphere',
+                             'k': k, 'tag': tag, 'retrain_every': None} for model in configs.MODELS]
+                plan.append({'version': version, 'dataset': dataset, 'composition': composition, 'tag': tag,
+                             'target_retrain_share': share, 'sphere_k': k, 'n_ratios': len(ratios),
+                             'share_in_always_runs': float((ratios > k).mean())})
     if plan:
         path = out_dir / '_sweep_plan.csv'
-        old = pd.read_csv(path) if path.exists() else pd.DataFrame()
         new = pd.DataFrame(plan)
-        if not old.empty:
-            keep = ~old.set_index(['dataset', 'model', 'composition', 'tag']).index.isin(
-                new.set_index(['dataset', 'model', 'composition', 'tag']).index)
-            new = pd.concat([old[keep], new], ignore_index=True)
+        if path.exists():
+            old = pd.read_csv(path)
+            keys = ['dataset', 'composition', 'tag']
+            if set(keys) <= set(old.columns):
+                keep = ~old.set_index(keys).index.isin(new.set_index(keys).index)
+                new = pd.concat([old[keep], new], ignore_index=True)
         new.to_csv(path, index=False)
     return entries
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--grid', required=True, nargs='+', choices=list(configs.GRIDS) + list(configs.DYNAMIC_SWEEPS))
-    p.add_argument('--datasets', nargs='+', default=None, help='only runs on these datasets')
+    p.add_argument('--version', default='v1', choices=list(configs.VERSIONS))
+    p.add_argument('--grid', required=True, nargs='+', choices=configs.RULES)
+    p.add_argument('--datasets', nargs='+', default=None, choices=list(configs.DATASETS),
+                   help='only these datasets (default: the datasets planned for the version and rule)')
     p.add_argument('--parallel', type=int, default=1)
     p.add_argument('--threads', type=int, default=None, help='CPU threads per run (default: 8 // parallel)')
     p.add_argument('--data-dir', type=Path, default=HERE.parent / 'data')
-    p.add_argument('--out-dir', type=Path, default=HERE / 'runs')
+    p.add_argument('--out-dir', type=Path, default=None, help="default: the version's folder (runs, runs_v2, runs_v3)")
     p.add_argument('--adazor-src', type=Path, default=HERE.parent / 'adazor' / 'src')
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('extra', nargs=argparse.REMAINDER, help='passed to drift_sphere.py after --')
     args = p.parse_args()
     extra = [a for a in args.extra if a != '--']
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = args.out_dir or HERE / configs.VERSIONS[args.version]['runs_dir']
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     jobs = []
-    for grid in args.grid:
-        entries = sweep_entries(grid, args.out_dir) if grid in configs.DYNAMIC_SWEEPS else configs.GRIDS[grid]
+    for rule in args.grid:
+        datasets = args.datasets or configs.PLAN[args.version][rule]
+        entries = (sweep_entries(args.version, datasets, out_dir) if rule == 'sweep'
+                   else configs.static_entries(rule, datasets))
         for entry in entries:
-            if args.datasets and entry[0] not in args.datasets:
-                continue
             if entry not in jobs:
                 jobs.append(entry)
 
     todo = []
-    for dataset, model, composition, preset, policy, k, tag in jobs:
-        name = configs.run_id(dataset, model, composition, preset, policy, k, tag)
-        if (args.out_dir / name / 'summary.json').exists():
+    for entry in jobs:
+        name = entry_name(entry, args.version)
+        if (out_dir / name / 'summary.json').exists():
             print(f'[skip] {name}')
             continue
-        cmd = [sys.executable, str(HERE / 'drift_sphere.py'), '--dataset', dataset, '--model', model,
-               '--composition', composition, '--preset', preset, '--retrain-policy', policy,
-               '--sphere-k', repr(float(k)), '--run-name', name, '--data-dir', str(args.data_dir),
-               '--out-dir', str(args.out_dir), '--adazor-src', str(args.adazor_src), *extra]
-        todo.append((name, cmd))
+        cmd = [sys.executable, str(HERE / 'drift_sphere.py'), '--dataset', entry['dataset'], '--model', entry['model'],
+               '--composition', entry['composition'], '--preset', PRESET, '--version', args.version,
+               '--retrain-policy', entry['policy'], '--sphere-k', repr(float(entry['k'])), '--run-name', name,
+               '--data-dir', str(args.data_dir), '--out-dir', str(out_dir), '--adazor-src', str(args.adazor_src)]
+        if entry['retrain_every'] is not None:
+            cmd += ['--retrain-every', str(entry['retrain_every'])]
+        todo.append((name, cmd + extra))
 
     print(f'{len(todo)} run(s) to do, {args.parallel} at a time', flush=True)
     if args.dry_run:
@@ -113,7 +134,7 @@ def main():
 
     threads = str(args.threads or max(1, 8 // args.parallel))
     env = dict(os.environ, OMP_NUM_THREADS=threads, MKL_NUM_THREADS=threads, OPENBLAS_NUM_THREADS=threads)
-    log_dir = args.out_dir / '_logs'
+    log_dir = out_dir / '_logs'
     log_dir.mkdir(parents=True, exist_ok=True)
 
     running, failed = [], []

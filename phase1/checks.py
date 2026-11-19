@@ -246,17 +246,25 @@ def check_warm_start():
 
 # 7 ---------------------------------------------------------------------------------------------
 def check_antoine(runs_dir):
+    """Each composition against Antoine's own run of that composition (rows where known, else dates)."""
     a = configs.ANTOINE_CHECK
     for comp in a['compositions']:
+        want = a['expected'][comp]
+        what = 'file rows' if 'rows' in want else 'dates'
+        expected = want.get('rows', want.get('dates'))
         name = configs.run_id(a['dataset'], a['model'], comp, 'antoine', a['policy'], 1.0, version='v1')
         path = runs_dir / name / 'drifts.tsv'
         if not (runs_dir / name / 'summary.json').exists():
-            record('7', f"Antoine's settings, {comp}: alarm file rows", a['alarm_rows'], 'not run yet', False,
+            record('7', f"Antoine's settings, {comp}: alarm {what}", expected, 'not run yet', False,
                    '(python run_grid.py --grid antoine)')
             continue
-        rows = pd.read_csv(path, sep='\t')['row_number'].tolist() if path.stat().st_size > 1 else []
-        record('7', f"Antoine's settings, {comp}: alarm file rows as in Antoine's own run", a['alarm_rows'], rows,
-               rows == a['alarm_rows'])
+        drifts = pd.read_csv(path, sep='\t') if path.stat().st_size > 1 else pd.DataFrame(columns=['row_number', 'timestamp'])
+        if what == 'file rows':
+            got = drifts['row_number'].tolist()
+        else:
+            got = [pd.to_datetime(float(t), unit='s', utc=True).strftime('%Y-%m-%d') for t in drifts['timestamp']]
+        record('7', f"Antoine's settings, {comp}: alarm {what} as in Antoine's own {comp} run", expected, got,
+               got == expected)
 
 
 def main():

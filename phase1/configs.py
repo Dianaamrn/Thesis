@@ -205,8 +205,13 @@ PLAN = {
 # gamma 0.5, no scaling) on his data (CASE1, Gene-Disease, cutoff 2002) and his model (TransE).
 # His own run alarmed at these file rows (as recorded in case1_evidence.ipynb).
 # ---------------------------------------------------------------------------
+# His run (his exact notebook, on Diana's PC, CPU; screenshot of 7 Nov) gave, per composition:
+#   concatenation: 4 alarms, file rows 2295, 2857, 3430, 37769
+#   hadamard:      1 alarm, on 2004-09-02 (the screenshot shows the date, not the file row)
 ANTOINE_CHECK = {'dataset': 'case1', 'model': 'TransE', 'compositions': COMPOSITIONS, 'policy': 'sphere',
-                 'alarm_rows': [2295, 2857, 3430, 37769], 'runs_dir': 'runs_antoine_check'}
+                 'expected': {'concatenation': {'rows': [2295, 2857, 3430, 37769]},
+                              'hadamard': {'dates': ['2004-09-02']}},
+                 'runs_dir': 'runs_antoine_check'}
 
 # ---------------------------------------------------------------------------
 # Sensitivity of the detector settings, one setting changed at a time (all others = PRESETS['phase1']).

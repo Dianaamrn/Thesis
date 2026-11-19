@@ -53,7 +53,7 @@ the method requires, measures it on the code's own output, and passes or fails (
 | 4 | Sphere rule: ratio = distance to the box centre / half the box diagonal | a point inside the box has ratio ≤ 1, a corner exactly 1 |
 | 5 | Features: Hadamard s·p·o, concatenation [s, p, o], unit vectors | on known vectors |
 | 6 | Warm start: old vectors kept, new entity random, a few epochs over the whole graph | real PyKEEN on a tiny graph, TransE and ComplEx: exact copy, then cosine of old vectors after one warm epoch vs from scratch |
-| 7 | Our port reproduces Antoine's own run | his settings (`--preset antoine`: 32 dims, 2 epochs, lr 0.001, γ 0.5, no scaling) on CASE1 with TransE give his alarm file rows 2295, 2857, 3430, 37769 |
+| 7 | Our port reproduces Antoine's own run | his settings (`--preset antoine`: 32 dims, 2 epochs, lr 0.001, γ 0.5, no scaling) on CASE1 with TransE give his alarms: concatenation at file rows 2295, 2857, 3430, 37769; Hadamard one alarm on 2004-09-02 |
 
 How each part of our code maps to Antoine's notebook (`reference/antoine_sphere_rule_edition2.ipynb`):
 

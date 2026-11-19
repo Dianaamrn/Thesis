@@ -14,7 +14,7 @@ The plan with the reasons and sources for every choice: `reports/Experiment plan
 | `v2_e2` | from scratch, 2 epochs for every model (each model's chosen learning rate) | `runs_v2_e2/` |
 | `v2_e10` | from scratch, 10 epochs for every model | `runs_v2_e10/` |
 | `v2_e20` | from scratch, 20 epochs for every model | `runs_v2_e20/` |
-| `v3` | warm start: the first embedding as in v1; every later re-embed starts from the previous vectors (a new entity from PyKEEN's random vector) and trains a few epochs over the whole graph; epochs and learning rate per model from `warm_check/<dataset>__chosen.csv` | `runs_v3/` |
+| `v3` | warm start: the first embedding as in v1; every later re-embed starts from the previous vectors (a new entity from PyKEEN's random vector) and trains a few epochs over the whole graph; epochs and learning rate per model and composition from `warm_check/<dataset>__chosen.csv` | `runs_v3/` |
 
 Antoine's own setting (from scratch, 2 epochs, learning rate 0.001 for every model) is in `runs_2epochs/` for CASE1,
 and his exact settings (32 dims, gamma 0.5, no scaling) are the correctness check: `runs_antoine_check/cpu/` (on a CPU,
@@ -74,10 +74,14 @@ The cutoff KG is split 96/2/2 (train / validation / test); validation MRR every 
 the learning rate with the best MRR and the epochs where it was reached. The reported MRR
 (`embedding_quality.py`) uses the test part.
 
-Warm start rule (v3, `warm_check.choose_warm`, fixed before any measurement): after adding one window of
-stream triples, candidates are 1, 2, 3, 5, 10 epochs at the chosen learning rate and one fifth of it. A
+Warm start rule (v3, `warm_check.choose_warm`, criteria fixed before any measurement): after adding one window
+of stream triples, candidates are 1, 2, 3, 5, 10 epochs at the chosen learning rate and one fifth of it. A
 candidate must keep >= 95% of the old triples' validation MRR and raise the old OCSVM's outlier rate on the
-reference by at most 0.05; among those, the best MRR on the added triples, then the fewest epochs.
+reference by at most 0.05; among those, the best MRR on the added triples, then the fewest epochs. If none
+passes, the gentlest update (1 epoch, lower rate) is taken and marked `passes = False`. The choice is made per
+model and composition (since 19 Nov: with Hadamard no setting kept the map, which first gave concatenation
+the gentlest update too). `python warm_check.py --dataset <d> --choose-only` redoes the choice from the saved
+measurements without training.
 
 ## Outputs
 

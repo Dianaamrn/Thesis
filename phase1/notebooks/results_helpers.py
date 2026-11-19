@@ -104,9 +104,14 @@ def quality_table():
 
 
 def warm_tables():
+    """The warm-start settings version v3 uses, per dataset (model x composition), as warm_check.load_chosen gives them."""
+    import warm_check
     out = {}
-    for f in sorted(paths()['warm'].glob('*__chosen.csv')):
-        out[f.name.split('__')[0]] = pd.read_csv(f)
+    for f in sorted(paths()['warm'].glob('*__table.csv')):
+        dataset = f.name.split('__')[0]
+        chosen = warm_check.load_chosen(dataset, paths()['warm'])
+        if chosen is not None:
+            out[dataset] = chosen
     return out
 
 

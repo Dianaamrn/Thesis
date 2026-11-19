@@ -151,28 +151,28 @@ VERSIONS = {
 }
 SCRATCH_VERSIONS = [v for v, d in VERSIONS.items() if d['embed_update'] == 'scratch']
 
-# Warm start (v3): epochs and learning rate of one warm re-embed, per (dataset, model).
+# Warm start (v3): epochs and learning rate of one warm re-embed, per (dataset, model, composition).
 # Filled automatically from warm_check/<dataset>__chosen.csv, which warm_check.py writes with the rule
-# fixed in advance (warm_check.choose_warm). An entry here overrides that file (by hand only).
+# warm_check.choose_warm (criteria fixed in advance; applied per composition since 19 Nov, see there).
+# An entry here, keyed (dataset, model, composition), overrides that file (by hand only).
 WARM = {
 }
 WARM_CHECK_DIR = 'warm_check'
 
 
-def warm_settings(dataset, model):
-    chosen = WARM.get((dataset, model))
+def warm_settings(dataset, model, composition):
+    chosen = WARM.get((dataset, model, composition))
     if chosen is not None:
         return dict(chosen)
-    import csv
-    from pathlib import Path
-    path = Path(__file__).resolve().parent / WARM_CHECK_DIR / f'{dataset}__chosen.csv'
-    if path.exists():
-        with path.open(encoding='utf-8') as f:
-            for row in csv.DictReader(f):
-                if row['model'] == model:
-                    return {'warm_epochs': int(row['warm_epochs']), 'warm_learning_rate': float(row['warm_learning_rate'])}
-    raise ValueError(f'no warm-start epochs / learning rate for ({dataset!r}, {model!r}): '
-                     f'run warm_check.py --dataset {dataset} first (writes {path.name})')
+    import warm_check   # here, not at the top: warm_check imports this module
+    table = warm_check.load_chosen(dataset)
+    if table is not None:
+        row = table[table['model'].eq(model) & table['composition'].eq(composition)]
+        if len(row):
+            row = row.iloc[0]
+            return {'warm_epochs': int(row['warm_epochs']), 'warm_learning_rate': float(row['warm_learning_rate'])}
+    raise ValueError(f'no warm-start epochs / learning rate for ({dataset!r}, {model!r}, {composition!r}): '
+                     f'run warm_check.py --dataset {dataset} first (writes {WARM_CHECK_DIR}/{dataset}__chosen.csv)')
 
 
 # Retraining rules (when the OCSVM is fitted again; after a drift alarm every rule re-embeds and refits):

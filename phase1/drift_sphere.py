@@ -891,7 +891,7 @@ def build_config(args):
         if args.warm_epochs is not None and args.warm_learning_rate is not None:  # both given = test run
             warm = {'warm_epochs': args.warm_epochs, 'warm_learning_rate': args.warm_learning_rate}
         else:
-            warm = configs.warm_settings(args.dataset, args.model)
+            warm = configs.warm_settings(args.dataset, args.model, args.composition)
             if args.warm_epochs is not None:
                 warm['warm_epochs'] = args.warm_epochs
             if args.warm_learning_rate is not None:

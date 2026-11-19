@@ -145,13 +145,25 @@ Random guessing is about 0.0001-0.0002. The warm start starts from the v1 embedd
 `warm_check.py` adds one window of stream triples (250) to the graph, continues training from the old vectors
 for 1, 2, 3, 5, 10 epochs at the chosen learning rate and one fifth of it (Wewer et al. 2021), and measures
 (a) the old triples' validation MRR, (b) how the old OCSVM judges the reference triples under the updated
-vectors, (c) the MRR of the added triples. The rule fixed before the measurements: pass (a) >= 95% of before
-and (b) a rise of at most 0.05, then the best (c), then the fewest epochs. `passes = False` means no setting
-passed and the gentlest one was taken.
+vectors, (c) the MRR of the added triples. The criteria fixed before the measurements: pass (a) >= 95% of
+before and (b) a rise of at most 0.05, then the best (c), then the fewest epochs. `passes = False` means no
+setting passed and the gentlest one was taken. The choice is made per model and composition: at first (b) had
+to hold for both compositions at once, but with Hadamard no setting passed (b) for any model on CASE1, which
+gave concatenation the gentlest update too (changed on 19 Nov, before any v3 run).
 """),
     code("""
 for dataset, table in rh.warm_tables().items():
-    print(dataset); display(table)
+    print(dataset)
+    display(table[['model', 'composition', 'warm_epochs', 'warm_learning_rate', 'passes', 'validation_mrr_before',
+                   'validation_mrr_after', 'added_mrr_before', 'added_mrr', 'reference_outlier_before',
+                   'reference_outlier_after', 'scratch_reference_outlier']])
+"""),
+    md("""
+All measurements (every learning rate and number of epochs, and the re-embed from scratch), per dataset:
+"""),
+    code("""
+for f in sorted(rh.paths()['warm'].glob('*__table.csv')):
+    print(f.name.split('__')[0]); display(pd.read_csv(f).round(4))
 """),
 ]
 

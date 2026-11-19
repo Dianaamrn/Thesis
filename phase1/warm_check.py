@@ -22,9 +22,11 @@ What it does, per model, on one dataset:
     python warm_check.py --dataset case1
     python warm_check.py --dataset full --models TransE RotatE
 
+    python warm_check.py --dataset case1 --choose-only   # no training: the choice again from the saved results
+
 Output in warm_check/: one JSON per dataset and model (resumable), <dataset>__table.csv (all
-measurements) and <dataset>__chosen.csv (the warm-start epochs and learning rate per model, which version
-v3 uses; see choose_warm for the rule, fixed before any measurement was seen).
+measurements) and <dataset>__chosen.csv (the warm-start epochs and learning rate per model and composition,
+which version v3 uses; see choose_warm for the rule).
 """
 from __future__ import annotations
 
@@ -154,50 +156,103 @@ TIE = 0.01                 # (c) added-triple MRRs within 1% of the best count a
 
 
 def choose_warm(table):
-    """Warm-start epochs and learning rate per model, with a rule fixed before any measurement was seen.
+    """Warm-start epochs and learning rate per model AND composition, with criteria fixed before any
+    measurement was seen.
 
     Candidates: every warm row with at least 1 epoch (learning rates: the chosen one and one fifth of it,
     Wewer et al. 2021; epochs 1, 2, 3, 5, 10). A candidate passes if
       (a) it keeps the old knowledge: validation MRR on the cutoff KG's validation triples >= 95% of the
           same model before the update (the 0-epoch row: old vectors, new entities random);
-      (b) it keeps the map: for both compositions, the outlier rate that the OCSVM fitted under the old
-          embedding gives the reference triples under the updated vectors is at most 0.05 above its rate under
-          the old embedding (half of Antoine's alarm gap of about 0.10, so the update alone cannot raise an alarm);
+      (b) it keeps the map: the outlier rate that the OCSVM fitted under the old embedding gives the reference
+          triples under the updated vectors is at most 0.05 above its rate under the old embedding (half of
+          Antoine's alarm gap of about 0.10, so the update alone cannot raise an alarm);
     and among the passing candidates
       (c) it learns the new triples: the highest MRR on the added stream triples; candidates within 1% of that
           count as equal, and the one with fewer epochs (then the lower learning rate) is taken.
     If no candidate passes (a) and (b), the gentlest update is taken (1 epoch, lower learning rate) and the
-    row says so (passes = False)."""
+    row says so (passes = False).
+
+    Changed on 19 Nov 2026, after the first measurements (CASE1, CASE2), with Diana's agreement: (b) was first
+    required for both compositions at once, giving one setting per model. With Hadamard no setting passed (b)
+    for any model, so concatenation also got the gentlest update, although longer updates pass (b) for it.
+    Now (b) is applied to each composition on its own; the criteria are unchanged."""
     out = []
     for model, d in table.groupby('model', sort=False):
         warm = d[d['start'].eq('warm')]
         before = warm[warm['epochs'].eq(0)].iloc[0]
-        cand = warm[warm['epochs'] >= 1].copy()
-        cand['keeps_old'] = cand['validation_mrr'] >= KEEP_OLD_MRR * before['validation_mrr']
-        rises = [cand[f'reference_outlier_{c}'] - cand[f'reference_outlier_{c}_old_embedding']
-                 for c in ('hadamard', 'concatenation')]
-        cand['reference_rise'] = np.maximum(rises[0], rises[1])
-        cand['keeps_map'] = cand['reference_rise'] <= MAX_REFERENCE_RISE
-        ok = cand[cand['keeps_old'] & cand['keeps_map']]
-        if len(ok):
-            best = ok['added_mrr'].max()
-            pick = ok[ok['added_mrr'] >= (1 - TIE) * best].sort_values(['epochs', 'learning_rate']).iloc[0]
-            passes, reason = True, 'passes (a) and (b); best added-triple MRR (c)'
-        else:
-            pick = cand.sort_values(['epochs', 'learning_rate']).iloc[0]
-            passes, reason = False, 'no candidate passes (a) and (b): gentlest update taken'
         scratch = d[d['start'].eq('scratch')]
-        out.append({'dataset': pick['dataset'], 'model': model, 'warm_epochs': int(pick['epochs']),
-                    'warm_learning_rate': float(pick['learning_rate']), 'passes': passes, 'reason': reason,
-                    'validation_mrr_before': float(before['validation_mrr']),
-                    'validation_mrr_after': float(pick['validation_mrr']),
-                    'added_mrr': float(pick['added_mrr']), 'reference_rise': float(pick['reference_rise']),
-                    'old_cosine': float(pick['old_cosine']), 'seconds': float(pick['seconds']),
-                    'scratch_added_mrr': float(scratch['added_mrr'].iloc[0]) if len(scratch) else np.nan,
-                    'scratch_validation_mrr': float(scratch['validation_mrr'].iloc[0]) if len(scratch) else np.nan,
-                    'scratch_seconds': float(scratch['seconds'].iloc[0]) if len(scratch) else np.nan,
-                    'candidates_passing': int(len(ok)), 'candidates': int(len(cand))})
+        for comp in configs.COMPOSITIONS:
+            cand = warm[warm['epochs'] >= 1].copy()
+            cand['keeps_old'] = cand['validation_mrr'] >= KEEP_OLD_MRR * before['validation_mrr']
+            cand['reference_rise'] = cand[f'reference_outlier_{comp}'] - cand[f'reference_outlier_{comp}_old_embedding']
+            cand['keeps_map'] = cand['reference_rise'] <= MAX_REFERENCE_RISE
+            ok = cand[cand['keeps_old'] & cand['keeps_map']]
+            if len(ok):
+                best = ok['added_mrr'].max()
+                pick = ok[ok['added_mrr'] >= (1 - TIE) * best].sort_values(['epochs', 'learning_rate']).iloc[0]
+                passes, reason = True, 'passes (a) and (b); best added-triple MRR (c)'
+            else:
+                pick = cand.sort_values(['epochs', 'learning_rate']).iloc[0]
+                passes, reason = False, 'no candidate passes (a) and (b): gentlest update taken'
+            out.append({'dataset': pick['dataset'], 'model': model, 'composition': comp,
+                        'warm_epochs': int(pick['epochs']), 'warm_learning_rate': float(pick['learning_rate']),
+                        'passes': passes, 'reason': reason,
+                        'validation_mrr_before': float(before['validation_mrr']),
+                        'validation_mrr_after': float(pick['validation_mrr']),
+                        'added_mrr_before': float(before['added_mrr']), 'added_mrr': float(pick['added_mrr']),
+                        'reference_outlier_before': float(pick[f'reference_outlier_{comp}_old_embedding']),
+                        'reference_outlier_after': float(pick[f'reference_outlier_{comp}']),
+                        'reference_rise': float(pick['reference_rise']),
+                        'old_cosine': float(pick['old_cosine']), 'seconds': float(pick['seconds']),
+                        'scratch_added_mrr': float(scratch['added_mrr'].iloc[0]) if len(scratch) else np.nan,
+                        'scratch_validation_mrr': float(scratch['validation_mrr'].iloc[0]) if len(scratch) else np.nan,
+                        'scratch_reference_outlier': float(scratch[f'reference_outlier_{comp}'].iloc[0]) if len(scratch) else np.nan,
+                        'scratch_seconds': float(scratch['seconds'].iloc[0]) if len(scratch) else np.nan,
+                        'candidates_passing': int(len(ok)), 'candidates': int(len(cand))})
     return pd.DataFrame(out)
+
+
+def load_chosen(dataset, out_dir=None):
+    """The warm-start settings per (model, composition) that version v3 uses.
+
+    Read from <dataset>__chosen.csv. A file written before the per-composition rule (no 'composition' column)
+    is not used: the choice is made again from <dataset>__table.csv (nothing is retrained). None if neither
+    file exists."""
+    out_dir = Path(out_dir) if out_dir is not None else HERE / configs.WARM_CHECK_DIR
+    chosen_path = out_dir / f'{dataset}__chosen.csv'
+    table_path = out_dir / f'{dataset}__table.csv'
+    if chosen_path.exists():
+        chosen = pd.read_csv(chosen_path)
+        if 'composition' in chosen.columns:
+            return chosen
+    if table_path.exists():
+        return choose_warm(pd.read_csv(table_path))
+    return None
+
+
+def write_tables(dataset, out_dir):
+    """<dataset>__table.csv from the per-model JSONs, and <dataset>__chosen.csv from choose_warm."""
+    tables = []
+    for f in sorted(out_dir.glob(f'{dataset}__*.json')):
+        res = json.loads(f.read_text(encoding='utf-8'))
+        t = pd.DataFrame(res['rows'])
+        t.insert(0, 'dataset', res['dataset'])
+        t['old_embedding_validation_mrr'] = res['base_validation_mrr']
+        tables.append(t)
+    if not tables:
+        raise SystemExit(f'no {dataset}__<model>.json in {out_dir}: run warm_check.py --dataset {dataset} first')
+    table = pd.concat(tables, ignore_index=True)
+    table.to_csv(out_dir / f'{dataset}__table.csv', index=False)
+    show = ['model', 'start', 'learning_rate', 'epochs', 'validation_mrr', 'added_mrr', 'old_cosine',
+            'reference_outlier_hadamard', 'reference_outlier_concatenation', 'seconds']
+    chosen = choose_warm(table)
+    chosen.to_csv(out_dir / f'{dataset}__chosen.csv', index=False)
+    with pd.option_context('display.width', 220, 'display.max_rows', 500):
+        print(table[show].round(4).to_string(index=False))
+        print('\nchosen for version v3, per model and composition (warm_check.choose_warm):')
+        print(chosen[['model', 'composition', 'warm_epochs', 'warm_learning_rate', 'passes', 'validation_mrr_before',
+                      'validation_mrr_after', 'added_mrr_before', 'added_mrr', 'reference_outlier_before',
+                      'reference_outlier_after']].round(4).to_string(index=False))
 
 
 def main():
@@ -213,8 +268,13 @@ def main():
     p.add_argument('--test-sample', type=int, default=2000)
     p.add_argument('--data-dir', type=Path, default=HERE.parent / 'data')
     p.add_argument('--out-dir', type=Path, default=HERE / 'warm_check')
+    p.add_argument('--choose-only', action='store_true',
+                   help='no training: rebuild the table and the choice from the saved per-model JSONs')
     args = p.parse_args()
     args.epoch_grid = sorted(set(args.epoch_grid))
+    if args.choose_only:
+        write_tables(args.dataset, args.out_dir)
+        return 0
 
     import torch
     from pykeen.triples import TriplesFactory
@@ -266,23 +326,7 @@ def main():
         print(f'[start] {args.dataset} {model_name}  ({time.strftime("%H:%M:%S")})', flush=True)
         path.write_text(json.dumps(check_model(model_name, data, args, device), indent=2), encoding='utf-8')
 
-    tables = []
-    for f in sorted(args.out_dir.glob(f'{args.dataset}__*.json')):
-        res = json.loads(f.read_text(encoding='utf-8'))
-        t = pd.DataFrame(res['rows'])
-        t.insert(0, 'dataset', res['dataset'])
-        t['old_embedding_validation_mrr'] = res['base_validation_mrr']
-        tables.append(t)
-    table = pd.concat(tables, ignore_index=True)
-    table.to_csv(args.out_dir / f'{args.dataset}__table.csv', index=False)
-    show = ['model', 'start', 'learning_rate', 'epochs', 'validation_mrr', 'added_mrr', 'old_cosine',
-            'reference_outlier_hadamard', 'reference_outlier_concatenation', 'seconds']
-    chosen = choose_warm(table)
-    chosen.to_csv(args.out_dir / f'{args.dataset}__chosen.csv', index=False)
-    with pd.option_context('display.width', 220, 'display.max_rows', 500):
-        print(table[show].round(4).to_string(index=False))
-        print('\nchosen for version v3 (warm_check.choose_warm):')
-        print(chosen.round(4).to_string(index=False))
+    write_tables(args.dataset, args.out_dir)
     return 0
 
 

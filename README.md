@@ -12,7 +12,7 @@ A Z-test on the share of outliers in the current window signals drift.
 
 | Folder | What |
 |---|---|
-| `phase1/` | The experiments: Antoine's method with 5 embedding models (TransE, TransH, DistMult, ComplEx, RotatE), Hadamard and concatenation, on CASE1, CASE2 and the full stream. Three versions of re-embedding (from scratch with chosen epochs, from scratch with 20 epochs, warm start), each with four retraining rules (Antoine's sphere, always, smaller spheres, every X triples); MRR; peak analysis. See `phase1/README.md`. |
+| `phase1/` | The experiments: Antoine's method with 5 embedding models (TransE, TransH, DistMult, ComplEx, RotatE), Hadamard and concatenation, on CASE1, CASE2 and the full stream. Five ways of re-embedding (from scratch with MRR-chosen epochs, from scratch with 2 / 10 / 20 epochs, warm start), each with four retraining rules (Antoine's sphere, always, smaller spheres, every X triples); correctness checks; MRR; peak analysis; sensitivity of the detector settings. See `phase1/README.md`. |
 | `phase2/` | Earlier side experiments (frozen embedding, alignment, other measures), written for an earlier setup; not updated to the current settings. |
 | `adazor/` | ADAZOR package (drift detectors), by Prof. Malchiodi |
 | `reference/` | Notebooks the code is based on, unchanged: `antoine_sphere_rule_edition2.ipynb` (Antoine, sphere rule, the Phase 1 baseline) and `edition1_dynamic_embeddings.ipynb` (first edition, mean-distance rule) |
@@ -37,7 +37,7 @@ Put these files in `data/` (they are ignored by git):
 git clone https://github.com/Dianaamrn/Thesis.git ~/Thesis
 mkdir -p ~/Thesis/data      # then copy the three data files here
 source ~/drift/.venv/bin/activate
-cd ~/Thesis/phase1 && bash run_versions.sh v1   # inside tmux; also v2, v3 (see phase1/README.md)
+cd ~/Thesis/phase1 && bash run_all.sh all   # inside tmux; or one stage at a time (see phase1/README.md)
 ```
 
 Requirements: Python 3.12, pykeen 1.11, torch 2.6 (CUDA), scikit-learn, pandas, numpy, scipy.

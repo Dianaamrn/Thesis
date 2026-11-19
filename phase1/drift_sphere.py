@@ -19,7 +19,7 @@ Z-test are the notebook's. What changed, and why:
   5. Extra logging for the analysis (stream index, event year, re-embed / retrain flags,
      embedding time). The final KG is not saved (it is the input file up to the end).
   6. Versions (`--version`, configs.VERSIONS): how the KG is re-embedded. v1 = from scratch with the
-     chosen epochs, v2 = from scratch with 20 epochs, v3 = warm start (the first embedding is trained
+     chosen epochs, v2_e2 / v2_e10 / v2_e20 = from scratch with 2 / 10 / 20 epochs, v3 = warm start (the first embedding is trained
      as in v1; every later re-embed starts from the previous vectors, a new entity from PyKEEN's
      random vector, and trains a few epochs over the whole KG).
   7. Retrain policy 'every' (`--retrain-every X`): the OCSVM is fitted again after every X stream
@@ -953,7 +953,8 @@ def main(argv=None):
     p.add_argument('--composition', default='hadamard', choices=configs.COMPOSITIONS)
     p.add_argument('--preset', default='phase1', choices=list(configs.PRESETS))
     p.add_argument('--version', default='v1', choices=list(configs.VERSIONS),
-                   help='how the KG is re-embedded: v1 scratch (chosen epochs), v2 scratch (20 epochs), v3 warm start')
+                   help='how the KG is re-embedded: v1 scratch (chosen epochs), v2_e2 / v2_e10 / v2_e20 scratch '
+                        '(2 / 10 / 20 epochs), v3 warm start')
     p.add_argument('--retrain-policy', default='sphere', choices=['sphere', 'always', 'never', 'every'])
     p.add_argument('--sphere-k', type=float, default=1.0)
     p.add_argument('--retrain-every', type=int, default=None, help="policy 'every': stream triples between OCSVM fits")

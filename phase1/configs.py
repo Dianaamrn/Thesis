@@ -8,9 +8,11 @@ As in the notebook, the KG is built from every triple up to the cutoff year, and
 ONE triple type is monitored: Gene - causes_or_contributes_to_condition - Disease on case1 and full,
 miRNA - causes_or_contributes_to_condition - Disease on case2 (too few Gene-Disease triples there).
 
-Three versions (how the graph is re-embedded: VERSIONS below) x four retraining rules (RULES below),
-5 models x 2 compositions, on case1, case2 and full; plus MRR per model and dataset, and the peak
-analysis (analyze.py). After a drift alarm every rule re-embeds and retrains (Antoine's code).
+Versions (how the graph is re-embedded: VERSIONS below: from scratch with the MRR-chosen epochs, from
+scratch with 2 / 10 / 20 epochs, warm start) x four retraining rules (RULES below), 5 models x 2
+compositions, on case1, case2 and full; plus MRR per model and dataset, the peak analysis (analyze.py),
+a correctness check with Antoine's own settings (ANTOINE_CHECK) and a sensitivity check of the detector
+settings (SENSITIVITY). After a drift alarm every rule re-embeds and retrains (Antoine's code).
 
 Embedding training: every model is trained with the same procedure, PyKEEN early stopping on
 validation MRR (settings_check.py). That gives each model and dataset its own learning rate and
@@ -128,33 +130,49 @@ def training_settings(preset, dataset, model):
 
 
 # ---------------------------------------------------------------------------
-# Versions = how the graph is re-embedded (strategy of 2026-11-16). Every version is run with the
-# four retraining rules below.
-#   v1  from scratch, learning rate and epochs from TRAINING (chosen by validation MRR)
-#   v2  from scratch, 20 epochs for every model (learning rate from TRAINING): the coldest start
-#   v3  warm start: the first embedding as in v1; every later re-embed starts from the previous
-#       vectors (a new entity starts at PyKEEN's random vector) and trains WARM epochs over the whole KG
+# Versions = how the graph is re-embedded (strategy of 2026-11-16, epochs 2 / 10 / 20 added 2026-11-19).
+# Every version is run with the four retraining rules below.
+#   v1      from scratch, learning rate and epochs from TRAINING (chosen by validation MRR)
+#   v2_e2   from scratch, 2 epochs for every model (Antoine's number of epochs)
+#   v2_e10  from scratch, 10 epochs for every model
+#   v2_e20  from scratch, 20 epochs for every model
+#           (v2_*: learning rate from TRAINING, so only the number of epochs differs from v1)
+#   v3      warm start: the first embedding as in v1; every later re-embed starts from the previous
+#           vectors (a new entity starts at PyKEEN's random vector) and trains a few epochs over the whole
+#           KG, with the epochs and learning rate chosen by warm_check.py (see warm_settings below)
 # runs_dir = folder of the version's runs; tag = last part of the run name.
 # ---------------------------------------------------------------------------
 VERSIONS = {
     'v1': {'embed_update': 'scratch', 'epochs': None, 'runs_dir': 'runs', 'tag': 'phase1'},
-    'v2': {'embed_update': 'scratch', 'epochs': 20, 'runs_dir': 'runs_v2', 'tag': 'v2'},
+    'v2_e2': {'embed_update': 'scratch', 'epochs': 2, 'runs_dir': 'runs_v2_e2', 'tag': 'v2e2'},
+    'v2_e10': {'embed_update': 'scratch', 'epochs': 10, 'runs_dir': 'runs_v2_e10', 'tag': 'v2e10'},
+    'v2_e20': {'embed_update': 'scratch', 'epochs': 20, 'runs_dir': 'runs_v2_e20', 'tag': 'v2e20'},
     'v3': {'embed_update': 'warm', 'epochs': None, 'runs_dir': 'runs_v3', 'tag': 'v3'},
 }
+SCRATCH_VERSIONS = [v for v, d in VERSIONS.items() if d['embed_update'] == 'scratch']
 
-# Warm start (v3): epochs and learning rate of one warm re-embed, per (dataset, model), chosen from
-# the measurements of warm_check.py. Empty until the check has been run: v3 refuses to start without it
-# (or without --warm-epochs and --warm-learning-rate on the command line).
+# Warm start (v3): epochs and learning rate of one warm re-embed, per (dataset, model).
+# Filled automatically from warm_check/<dataset>__chosen.csv, which warm_check.py writes with the rule
+# fixed in advance (warm_check.choose_warm). An entry here overrides that file (by hand only).
 WARM = {
 }
+WARM_CHECK_DIR = 'warm_check'
 
 
 def warm_settings(dataset, model):
     chosen = WARM.get((dataset, model))
-    if chosen is None:
-        raise ValueError(f'no warm-start epochs / learning rate for ({dataset!r}, {model!r}) in configs.WARM: '
-                         'run warm_check.py first and fill in WARM')
-    return dict(chosen)
+    if chosen is not None:
+        return dict(chosen)
+    import csv
+    from pathlib import Path
+    path = Path(__file__).resolve().parent / WARM_CHECK_DIR / f'{dataset}__chosen.csv'
+    if path.exists():
+        with path.open(encoding='utf-8') as f:
+            for row in csv.DictReader(f):
+                if row['model'] == model:
+                    return {'warm_epochs': int(row['warm_epochs']), 'warm_learning_rate': float(row['warm_learning_rate'])}
+    raise ValueError(f'no warm-start epochs / learning rate for ({dataset!r}, {model!r}): '
+                     f'run warm_check.py --dataset {dataset} first (writes {path.name})')
 
 
 # Retraining rules (when the OCSVM is fitted again; after a drift alarm every rule re-embeds and refits):
@@ -168,16 +186,51 @@ SWEEP_TARGETS = {'sphereR10': 0.10, 'sphereR50': 0.50, 'sphereR90': 0.90}
 EVERY_X = [10, 50, 250]
 RULES = ['sphere', 'always', 'sweep', 'every']
 
-# Which datasets each version runs each rule on by default (decided 2026-11-16). On the full data v1
-# keeps the two finished rules; v2 gets Rules 3 and 4 there only if time allows (ask for it with
-# --datasets full).
+# Which datasets each version runs each rule on by default (2026-11-19). Every version runs every rule on
+# every dataset, except v1 on the full data: its two finished rules stay (one run takes 5 to 27 hours),
+# Rules 3 and 4 are not run there.
 ALL_DATASETS = ['case1', 'case2', 'full']
 CASES = ['case1', 'case2']
+_ALL_RULES = {'sphere': ALL_DATASETS, 'always': ALL_DATASETS, 'sweep': ALL_DATASETS, 'every': ALL_DATASETS}
 PLAN = {
     'v1': {'sphere': ALL_DATASETS, 'always': ALL_DATASETS, 'sweep': CASES, 'every': CASES},
-    'v2': {'sphere': ALL_DATASETS, 'always': ALL_DATASETS, 'sweep': CASES, 'every': CASES},
-    'v3': {'sphere': ALL_DATASETS, 'always': ALL_DATASETS, 'sweep': ALL_DATASETS, 'every': ALL_DATASETS},
+    'v2_e2': dict(_ALL_RULES),
+    'v2_e10': dict(_ALL_RULES),
+    'v2_e20': dict(_ALL_RULES),
+    'v3': dict(_ALL_RULES),
 }
+
+# ---------------------------------------------------------------------------
+# Correctness check: Antoine's own settings (preset 'antoine': 32 dims, 2 epochs, learning rate 0.001,
+# gamma 0.5, no scaling) on his data (CASE1, Gene-Disease, cutoff 2002) and his model (TransE).
+# His own run alarmed at these file rows (as recorded in case1_evidence.ipynb).
+# ---------------------------------------------------------------------------
+ANTOINE_CHECK = {'dataset': 'case1', 'model': 'TransE', 'compositions': COMPOSITIONS, 'policy': 'sphere',
+                 'alarm_rows': [2295, 2857, 3430, 37769], 'runs_dir': 'runs_antoine_check'}
+
+# ---------------------------------------------------------------------------
+# Sensitivity of the detector settings, one setting changed at a time (all others = PRESETS['phase1']).
+# Run on the two cases, all 5 models, both compositions, one version and Rule 2 (always: the OCSVM always
+# works on the current embedding, so the setting itself is what changes). Values from the literature:
+#   nu      0.1 is the Phase 1 value; 0.05 and 0.2 around it (the OCDD code uses 0.5, too far for a 0.10 test)
+#   window  250 (ADAZOR / Antoine); 100 (OCDD example); 200. Not larger: the cases have only 506 (CASE1)
+#           and 476 (CASE2) monitored triples up to the cutoff, and the reference is what the first window
+#           leaves (a window of 500 would leave 6 and 0 reference triples). A smaller window therefore
+#           also means a larger first reference.
+#   alpha   0.025 (Antoine); 0.003 and 0.05 (STEPD's drift and warning levels)
+#   keep    0.10 (Antoine); 0.5 and 0.9 (fewer untested refill triples after an alarm)
+#   seed    42 (all runs); 43 and 44 (seed variation of the embedding)
+# ---------------------------------------------------------------------------
+SENSITIVITY = {
+    'nu': [0.05, 0.2],
+    'window_size': [100, 200],
+    'alpha': [0.003, 0.05],
+    'keep_fraction_after_drift': [0.5, 0.9],
+    'seed': [43, 44],
+}
+SENSITIVITY_VERSION = 'v2_e20'
+SENSITIVITY_RULE = 'always'
+SENSITIVITY_RUNS_DIR = 'runs_sensitivity'
 
 
 def static_entries(rule, datasets):
@@ -197,7 +250,8 @@ def static_entries(rule, datasets):
     return out
 
 
-def run_id(dataset, model, composition, preset, policy, k, tag=None, version='v1', retrain_every=None):
+def run_id(dataset, model, composition, preset, policy, k, tag=None, version='v1', retrain_every=None, suffix=None):
+    """dataset__model__composition__rule__version[__setting]; the last part only for sensitivity runs."""
     if tag:
         policy_tag = tag
     elif policy == 'sphere':
@@ -207,4 +261,10 @@ def run_id(dataset, model, composition, preset, policy, k, tag=None, version='v1
     else:
         policy_tag = policy
     last = preset if version == 'v1' else VERSIONS[version]['tag']
-    return f'{dataset}__{model}__{composition}__{policy_tag}__{last}'
+    name = f'{dataset}__{model}__{composition}__{policy_tag}__{last}'
+    return f'{name}__{suffix}' if suffix else name
+
+
+def sensitivity_suffix(setting, value):
+    short = {'nu': 'nu', 'window_size': 'win', 'alpha': 'alpha', 'keep_fraction_after_drift': 'keep', 'seed': 'seed'}
+    return f'{short[setting]}{value:g}'

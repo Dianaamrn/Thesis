@@ -27,8 +27,9 @@ def main():
     p.add_argument('--dataset', required=True, choices=list(configs.DATASETS))
     p.add_argument('--models', nargs='+', default=configs.MODELS, choices=configs.MODELS)
     p.add_argument('--preset', default='phase1', choices=list(configs.PRESETS))
-    p.add_argument('--version', default='v1', choices=['v1', 'v2'],
-                   help='v1: the chosen epochs; v2: 20 epochs for every model (v3 starts from the v1 embedding)')
+    p.add_argument('--version', default='v1', choices=configs.SCRATCH_VERSIONS,
+                   help='v1: the chosen epochs; v2_e2 / v2_e10 / v2_e20: 2 / 10 / 20 epochs for every model '
+                        '(v3 starts from the v1 embedding)')
     p.add_argument('--data-dir', type=Path, default=HERE.parent / 'data')
     p.add_argument('--out-dir', type=Path, default=HERE / 'quality')
     p.add_argument('--test-sample', type=int, default=2000)

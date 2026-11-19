@@ -22,8 +22,9 @@ What it does, per model, on one dataset:
     python warm_check.py --dataset case1
     python warm_check.py --dataset full --models TransE RotatE
 
-Output in warm_check/: one JSON per dataset and model (resumable), and <dataset>__table.csv.
-The table is for choosing configs.WARM by hand; this script does not choose.
+Output in warm_check/: one JSON per dataset and model (resumable), <dataset>__table.csv (all
+measurements) and <dataset>__chosen.csv (the warm-start epochs and learning rate per model, which version
+v3 uses; see choose_warm for the rule, fixed before any measurement was seen).
 """
 from __future__ import annotations
 
@@ -147,6 +148,58 @@ def check_model(model_name, data, args, device):
             'new_entities_in_block': data['new_entities'], 'rows': rows}
 
 
+KEEP_OLD_MRR = 0.95        # (a) the old triples' validation MRR keeps at least 95% of its value before the update
+MAX_REFERENCE_RISE = 0.05  # (b) the old OCSVM's outlier rate on the reference rises by at most 0.05 (half the 0.10 alarm gap)
+TIE = 0.01                 # (c) added-triple MRRs within 1% of the best count as equal; then fewer epochs, then lower rate
+
+
+def choose_warm(table):
+    """Warm-start epochs and learning rate per model, with a rule fixed before any measurement was seen.
+
+    Candidates: every warm row with at least 1 epoch (learning rates: the chosen one and one fifth of it,
+    Wewer et al. 2021; epochs 1, 2, 3, 5, 10). A candidate passes if
+      (a) it keeps the old knowledge: validation MRR on the cutoff KG's validation triples >= 95% of the
+          same model before the update (the 0-epoch row: old vectors, new entities random);
+      (b) it keeps the map: for both compositions, the outlier rate that the OCSVM fitted under the old
+          embedding gives the reference triples under the updated vectors is at most 0.05 above its rate under
+          the old embedding (half of Antoine's alarm gap of about 0.10, so the update alone cannot raise an alarm);
+    and among the passing candidates
+      (c) it learns the new triples: the highest MRR on the added stream triples; candidates within 1% of that
+          count as equal, and the one with fewer epochs (then the lower learning rate) is taken.
+    If no candidate passes (a) and (b), the gentlest update is taken (1 epoch, lower learning rate) and the
+    row says so (passes = False)."""
+    out = []
+    for model, d in table.groupby('model', sort=False):
+        warm = d[d['start'].eq('warm')]
+        before = warm[warm['epochs'].eq(0)].iloc[0]
+        cand = warm[warm['epochs'] >= 1].copy()
+        cand['keeps_old'] = cand['validation_mrr'] >= KEEP_OLD_MRR * before['validation_mrr']
+        rises = [cand[f'reference_outlier_{c}'] - cand[f'reference_outlier_{c}_old_embedding']
+                 for c in ('hadamard', 'concatenation')]
+        cand['reference_rise'] = np.maximum(rises[0], rises[1])
+        cand['keeps_map'] = cand['reference_rise'] <= MAX_REFERENCE_RISE
+        ok = cand[cand['keeps_old'] & cand['keeps_map']]
+        if len(ok):
+            best = ok['added_mrr'].max()
+            pick = ok[ok['added_mrr'] >= (1 - TIE) * best].sort_values(['epochs', 'learning_rate']).iloc[0]
+            passes, reason = True, 'passes (a) and (b); best added-triple MRR (c)'
+        else:
+            pick = cand.sort_values(['epochs', 'learning_rate']).iloc[0]
+            passes, reason = False, 'no candidate passes (a) and (b): gentlest update taken'
+        scratch = d[d['start'].eq('scratch')]
+        out.append({'dataset': pick['dataset'], 'model': model, 'warm_epochs': int(pick['epochs']),
+                    'warm_learning_rate': float(pick['learning_rate']), 'passes': passes, 'reason': reason,
+                    'validation_mrr_before': float(before['validation_mrr']),
+                    'validation_mrr_after': float(pick['validation_mrr']),
+                    'added_mrr': float(pick['added_mrr']), 'reference_rise': float(pick['reference_rise']),
+                    'old_cosine': float(pick['old_cosine']), 'seconds': float(pick['seconds']),
+                    'scratch_added_mrr': float(scratch['added_mrr'].iloc[0]) if len(scratch) else np.nan,
+                    'scratch_validation_mrr': float(scratch['validation_mrr'].iloc[0]) if len(scratch) else np.nan,
+                    'scratch_seconds': float(scratch['seconds'].iloc[0]) if len(scratch) else np.nan,
+                    'candidates_passing': int(len(ok)), 'candidates': int(len(cand))})
+    return pd.DataFrame(out)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     p.add_argument('--dataset', required=True, choices=list(configs.DATASETS))
@@ -224,8 +277,12 @@ def main():
     table.to_csv(args.out_dir / f'{args.dataset}__table.csv', index=False)
     show = ['model', 'start', 'learning_rate', 'epochs', 'validation_mrr', 'added_mrr', 'old_cosine',
             'reference_outlier_hadamard', 'reference_outlier_concatenation', 'seconds']
+    chosen = choose_warm(table)
+    chosen.to_csv(args.out_dir / f'{args.dataset}__chosen.csv', index=False)
     with pd.option_context('display.width', 220, 'display.max_rows', 500):
         print(table[show].round(4).to_string(index=False))
+        print('\nchosen for version v3 (warm_check.choose_warm):')
+        print(chosen.round(4).to_string(index=False))
     return 0
 
 

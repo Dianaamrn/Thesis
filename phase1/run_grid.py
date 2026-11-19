@@ -38,8 +38,31 @@ PRESET = 'phase1'
 
 
 def entry_name(entry, version):
-    return configs.run_id(entry['dataset'], entry['model'], entry['composition'], PRESET, entry['policy'],
-                          entry['k'], entry['tag'], version=version, retrain_every=entry['retrain_every'])
+    return configs.run_id(entry['dataset'], entry['model'], entry['composition'], entry.get('preset', PRESET),
+                          entry['policy'], entry['k'], entry['tag'], version=version,
+                          retrain_every=entry['retrain_every'], suffix=entry.get('suffix'))
+
+
+def antoine_entries():
+    """Correctness check: Antoine's own settings (preset 'antoine') on his data and model."""
+    a = configs.ANTOINE_CHECK
+    return [{'dataset': a['dataset'], 'model': a['model'], 'composition': c, 'policy': a['policy'], 'k': 1.0,
+             'tag': None, 'retrain_every': None, 'preset': 'antoine'} for c in a['compositions']]
+
+
+def sensitivity_entries(datasets):
+    """One detector setting changed at a time (configs.SENSITIVITY), Rule 2, on the given datasets."""
+    out = []
+    for setting, values in configs.SENSITIVITY.items():
+        for value in values:
+            for d in datasets:
+                for m in configs.MODELS:
+                    for c in configs.COMPOSITIONS:
+                        out.append({'dataset': d, 'model': m, 'composition': c, 'policy': configs.SENSITIVITY_RULE,
+                                    'k': 1.0, 'tag': None, 'retrain_every': None,
+                                    'suffix': configs.sensitivity_suffix(setting, value),
+                                    'extra': ['--' + setting.replace('_', '-'), repr(value)]})
+    return out
 
 
 def sweep_entries(version, datasets, out_dir):
@@ -87,8 +110,12 @@ def sweep_entries(version, datasets, out_dir):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--version', default='v1', choices=list(configs.VERSIONS))
-    p.add_argument('--grid', required=True, nargs='+', choices=configs.RULES)
+    p.add_argument('--version', default=None, choices=list(configs.VERSIONS),
+                   help='default v1; for --grid sensitivity: configs.SENSITIVITY_VERSION')
+    p.add_argument('--grid', required=True, nargs='+', choices=configs.RULES + ['antoine', 'sensitivity'],
+                   help="rules (sphere always sweep every), or 'antoine' (correctness check with Antoine's "
+                        "settings) or 'sensitivity' (detector settings, one at a time). Don't mix the last two "
+                        'with the rules in one call: they write to their own folders.')
     p.add_argument('--datasets', nargs='+', default=None, choices=list(configs.DATASETS),
                    help='only these datasets (default: the datasets planned for the version and rule)')
     p.add_argument('--parallel', type=int, default=1)
@@ -100,14 +127,31 @@ def main():
     p.add_argument('extra', nargs=argparse.REMAINDER, help='passed to drift_sphere.py after --')
     args = p.parse_args()
     extra = [a for a in args.extra if a != '--']
-    out_dir = args.out_dir or HERE / configs.VERSIONS[args.version]['runs_dir']
+    special = [g for g in args.grid if g in ('antoine', 'sensitivity')]
+    if special and len(args.grid) > 1:
+        p.error("--grid antoine / sensitivity must be given alone")
+    if special == ['antoine']:
+        args.version = 'v1'
+        default_dir = HERE / configs.ANTOINE_CHECK['runs_dir']
+    elif special == ['sensitivity']:
+        args.version = args.version or configs.SENSITIVITY_VERSION
+        default_dir = HERE / configs.SENSITIVITY_RUNS_DIR
+    else:
+        args.version = args.version or 'v1'
+        default_dir = HERE / configs.VERSIONS[args.version]['runs_dir']
+    out_dir = args.out_dir or default_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     jobs = []
     for rule in args.grid:
-        datasets = args.datasets or configs.PLAN[args.version][rule]
-        entries = (sweep_entries(args.version, datasets, out_dir) if rule == 'sweep'
-                   else configs.static_entries(rule, datasets))
+        if rule == 'antoine':
+            entries = antoine_entries()
+        elif rule == 'sensitivity':
+            entries = sensitivity_entries(args.datasets or configs.CASES)
+        else:
+            datasets = args.datasets or configs.PLAN[args.version][rule]
+            entries = (sweep_entries(args.version, datasets, out_dir) if rule == 'sweep'
+                       else configs.static_entries(rule, datasets))
         for entry in entries:
             if entry not in jobs:
                 jobs.append(entry)
@@ -119,12 +163,12 @@ def main():
             print(f'[skip] {name}')
             continue
         cmd = [sys.executable, str(HERE / 'drift_sphere.py'), '--dataset', entry['dataset'], '--model', entry['model'],
-               '--composition', entry['composition'], '--preset', PRESET, '--version', args.version,
+               '--composition', entry['composition'], '--preset', entry.get('preset', PRESET), '--version', args.version,
                '--retrain-policy', entry['policy'], '--sphere-k', repr(float(entry['k'])), '--run-name', name,
                '--data-dir', str(args.data_dir), '--out-dir', str(out_dir), '--adazor-src', str(args.adazor_src)]
         if entry['retrain_every'] is not None:
             cmd += ['--retrain-every', str(entry['retrain_every'])]
-        todo.append((name, cmd + extra))
+        todo.append((name, cmd + entry.get('extra', []) + extra))
 
     print(f'{len(todo)} run(s) to do, {args.parallel} at a time', flush=True)
     if args.dry_run:

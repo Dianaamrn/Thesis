@@ -16,7 +16,15 @@ phase1/quality/
 phase1/settings_check/
 phase1/runs_2epochs/
 phase1/runs_v2/
+phase1/runs_v2_e2/
+phase1/runs_v2_e10/
+phase1/runs_v2_e20/
 phase1/runs_v3/
+phase1/runs_sensitivity/
+phase1/runs_antoine_check/
+phase1/analysis_sensitivity/
+phase1/checks/
+phase1/notebooks/executed/
 phase1/warm_check/
 phase1/notebook_cache/
 phase1/*.log

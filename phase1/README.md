@@ -17,7 +17,8 @@ The plan with the reasons and sources for every choice: `reports/Experiment plan
 | `v3` | warm start: the first embedding as in v1; every later re-embed starts from the previous vectors (a new entity from PyKEEN's random vector) and trains a few epochs over the whole graph; epochs and learning rate per model from `warm_check/<dataset>__chosen.csv` | `runs_v3/` |
 
 Antoine's own setting (from scratch, 2 epochs, learning rate 0.001 for every model) is in `runs_2epochs/` for CASE1,
-and his exact settings (32 dims, gamma 0.5, no scaling) are the correctness check in `runs_antoine_check/`.
+and his exact settings (32 dims, gamma 0.5, no scaling) are the correctness check: `runs_antoine_check/cpu/` (on a CPU,
+like his own run; graded) and `runs_antoine_check/` (on the GPU, like every experiment run; reported as a finding).
 
 ## Rules: when the OCSVM is retrained
 

@@ -211,6 +211,9 @@ PLAN = {
 ANTOINE_CHECK = {'dataset': 'case1', 'model': 'TransE', 'compositions': COMPOSITIONS, 'policy': 'sphere',
                  'expected': {'concatenation': {'rows': [2295, 2857, 3430, 37769]},
                               'hadamard': {'dates': ['2004-09-02']}},
+                 # His run was on a CPU, so check 7 grades our CPU run against it. The GPU run (the hardware of
+                 # every experiment run) is reported next to it as a finding, not graded.
+                 'cpu_runs_dir': 'runs_antoine_check/cpu',
                  'runs_dir': 'runs_antoine_check'}
 
 # ---------------------------------------------------------------------------

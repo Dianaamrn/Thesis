@@ -32,8 +32,10 @@ CASE_VERSIONS="v2_e2 v2_e10 v2_e20 v3 v1"
 FULL_VERSIONS="v2_e2 v3 v2_e10 v2_e20"
 
 stage_checks() {
-  step "correctness: Antoine's own settings on CASE1 (TransE, sphere rule, both compositions)"
+  step "correctness: Antoine's own settings on CASE1 (TransE, sphere rule, both compositions), GPU"
   grid --grid antoine
+  step "correctness: the same on the CPU, the hardware of Antoine's own run (graded by check 7)"
+  python run_grid.py --grid antoine --out-dir runs_antoine_check/cpu --parallel 1 -- --device cpu
   step "correctness checks (writes checks/checks.csv)"
   python checks.py
 }

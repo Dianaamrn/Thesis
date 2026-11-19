@@ -14,7 +14,9 @@ Each check states what the method requires, measures it on the code's own output
   5  the features: Hadamard = s * p * o, concatenation = [s, p, o], every vector has length 1
   6  the warm start, with real PyKEEN on a tiny graph: old vectors are copied exactly, a new entity is not,
      and one warm epoch keeps old vectors close (cosine) while a from-scratch training does not
-  7  Antoine's own settings reproduce his alarms (when runs_antoine_check exists: run_grid.py --grid antoine)
+  7  Antoine's own settings reproduce his alarms. His run was on a CPU, so the CPU run is graded
+     (runs_antoine_check/cpu); the GPU run (runs_antoine_check, the hardware of every experiment run) is
+     reported next to it as a finding, not graded
 
     python checks.py                      # all checks; writes checks/checks.csv
     python checks.py --skip-pykeen        # without check 6
@@ -46,10 +48,12 @@ EXPECTED_DATA = {
 RESULTS = []
 
 
-def record(check, what, expected, got, passed, detail=''):
+def record(check, what, expected, got, passed, detail='', info=False):
+    """One check result. info=True: a finding reported for information, never counted as a failure."""
     RESULTS.append({'check': check, 'what': what, 'expected': str(expected), 'got': str(got),
-                    'passed': bool(passed), 'detail': detail})
-    print(f"[{'PASS' if passed else 'FAIL'}] {check} {what}: expected {expected}, got {got} {detail}", flush=True)
+                    'passed': bool(passed) or info, 'info': bool(info), 'detail': detail})
+    tag = 'INFO' if info else ('PASS' if passed else 'FAIL')
+    print(f"[{tag}] {check} {what}: expected {expected}, got {got} {detail}", flush=True)
 
 
 # 1 ---------------------------------------------------------------------------------------------
@@ -245,26 +249,45 @@ def check_warm_start():
 
 
 # 7 ---------------------------------------------------------------------------------------------
-def check_antoine(runs_dir):
-    """Each composition against Antoine's own run of that composition (rows where known, else dates)."""
+def _alarms(run_dir, what):
+    """Alarm file rows or dates (UTC) of a finished run; None if the run is not there."""
+    if not (run_dir / 'summary.json').exists():
+        return None
+    path = run_dir / 'drifts.tsv'
+    drifts = pd.read_csv(path, sep='\t') if path.stat().st_size > 1 else pd.DataFrame(columns=['row_number', 'timestamp'])
+    if what == 'file rows':
+        return drifts['row_number'].tolist()
+    return [pd.to_datetime(float(t), unit='s', utc=True).strftime('%Y-%m-%d') for t in drifts['timestamp']]
+
+
+def check_antoine(gpu_dir, cpu_dir):
+    """Each composition against Antoine's own run of that composition (rows where known, else dates).
+
+    His run was on a CPU, so the CPU run is graded. The GPU run (the hardware of every experiment run) is
+    reported next to it as a finding: GPU and CPU arithmetic differ slightly, which can move an alarm.
+    """
     a = configs.ANTOINE_CHECK
     for comp in a['compositions']:
         want = a['expected'][comp]
         what = 'file rows' if 'rows' in want else 'dates'
         expected = want.get('rows', want.get('dates'))
         name = configs.run_id(a['dataset'], a['model'], comp, 'antoine', a['policy'], 1.0, version='v1')
-        path = runs_dir / name / 'drifts.tsv'
-        if not (runs_dir / name / 'summary.json').exists():
-            record('7', f"Antoine's settings, {comp}: alarm {what}", expected, 'not run yet', False,
-                   '(python run_grid.py --grid antoine)')
-            continue
-        drifts = pd.read_csv(path, sep='\t') if path.stat().st_size > 1 else pd.DataFrame(columns=['row_number', 'timestamp'])
-        if what == 'file rows':
-            got = drifts['row_number'].tolist()
+        cpu = _alarms(cpu_dir / name, what)
+        if cpu is None:
+            record('7', f"Antoine's settings on the CPU, {comp}: alarm {what}", expected, 'not run yet', False,
+                   f'(python run_grid.py --grid antoine --out-dir {configs.ANTOINE_CHECK["cpu_runs_dir"]} -- --device cpu)')
         else:
-            got = [pd.to_datetime(float(t), unit='s', utc=True).strftime('%Y-%m-%d') for t in drifts['timestamp']]
-        record('7', f"Antoine's settings, {comp}: alarm {what} as in Antoine's own {comp} run", expected, got,
-               got == expected)
+            record('7', f"Antoine's settings on the CPU, like his run, {comp}: alarm {what} as in Antoine's own {comp} run",
+                   expected, cpu, cpu == expected)
+        gpu = _alarms(gpu_dir / name, what)
+        if gpu is None:
+            detail = 'GPU run not there (python run_grid.py --grid antoine)'
+        elif cpu is None:
+            detail = 'no CPU run to compare with'
+        else:
+            detail = 'same as on the CPU' if gpu == cpu else 'differs from the CPU run (GPU vs CPU arithmetic)'
+        record('7', f"the same on the GPU, where every experiment run is, {comp}: alarm {what}", expected,
+               'not run yet' if gpu is None else gpu, True, detail, info=True)
 
 
 def main():
@@ -296,12 +319,14 @@ def main():
     check_geometry()
     if not args.skip_pykeen:
         check_warm_start()
-    check_antoine(HERE / configs.ANTOINE_CHECK['runs_dir'])
+    check_antoine(HERE / configs.ANTOINE_CHECK['runs_dir'], HERE / configs.ANTOINE_CHECK['cpu_runs_dir'])
 
     table = pd.DataFrame(RESULTS)
     table.to_csv(args.out / 'checks.csv', index=False)
     n_fail = int((~table['passed']).sum())
-    print(f'\n{len(table)} checks, {n_fail} failed -> {args.out / "checks.csv"}')
+    n_info = int(table['info'].sum())
+    print(f'\n{len(table) - n_info} checks, {n_fail} failed; {n_info} findings for information '
+          f'-> {args.out / "checks.csv"}')
     return 0
 
 

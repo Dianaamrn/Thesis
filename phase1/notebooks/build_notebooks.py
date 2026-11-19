@@ -53,7 +53,7 @@ the method requires, measures it on the code's own output, and passes or fails (
 | 4 | Sphere rule: ratio = distance to the box centre / half the box diagonal | a point inside the box has ratio ≤ 1, a corner exactly 1 |
 | 5 | Features: Hadamard s·p·o, concatenation [s, p, o], unit vectors | on known vectors |
 | 6 | Warm start: old vectors kept, new entity random, a few epochs over the whole graph | real PyKEEN on a tiny graph, TransE and ComplEx: exact copy, then cosine of old vectors after one warm epoch vs from scratch |
-| 7 | Our port reproduces Antoine's own run | his settings (`--preset antoine`: 32 dims, 2 epochs, lr 0.001, γ 0.5, no scaling) on CASE1 with TransE give his alarms: concatenation at file rows 2295, 2857, 3430, 37769; Hadamard one alarm on 2004-09-02 |
+| 7 | Our port reproduces Antoine's own run | his settings (`--preset antoine`: 32 dims, 2 epochs, lr 0.001, γ 0.5, no scaling) on CASE1 with TransE, run on a CPU like his run, give his alarms: concatenation at file rows 2295, 2857, 3430, 37769; Hadamard one alarm on 2004-09-02. The same run on the GPU (where every experiment run is) is shown next to it as a finding, not graded |
 
 How each part of our code maps to Antoine's notebook (`reference/antoine_sphere_rule_edition2.ipynb`):
 
@@ -74,11 +74,16 @@ if RUN_CHECKS:
 """),
     code("""
 c = rh.read_csv(rh.paths()['checks'])
-print(f"{len(c)} checks: {int(c['passed'].sum())} passed, {int((~c['passed']).sum())} failed")
-c[['check', 'what', 'expected', 'got', 'passed']]
+info = c['info'].astype(bool) if 'info' in c else pd.Series(False, index=c.index)
+print(f"{int((~info).sum())} checks: {int((c['passed'] & ~info).sum())} passed, {int((~c['passed']).sum())} failed; "
+      f"{int(info.sum())} findings for information")
+c[['check', 'what', 'expected', 'got', 'passed', 'detail']]
 """),
     code("""
 c[~c['passed']]   # anything listed here needs attention before the results are read
+"""),
+    code("""
+c[info][['check', 'what', 'expected', 'got', 'detail']]   # findings: reported, not graded
 """),
 ]
 
@@ -122,8 +127,10 @@ print(f'{len(t)} finished runs')
     md("## 2. Correctness checks (details in `checks.ipynb`)"),
     code("""
 c = rh.read_csv(rh.paths()['checks'])
-print(f"{len(c)} checks, {int(c['passed'].sum())} passed" if len(c) else 'checks not run yet')
-c[~c['passed']] if len(c) else None
+info = c['info'].astype(bool) if 'info' in c else pd.Series(False, index=c.index)
+print(f"{int((~info).sum())} checks, {int((c['passed'] & ~info).sum())} passed; {int(info.sum())} findings"
+      if len(c) else 'checks not run yet')
+c[~c['passed'] | info] if len(c) else None   # failures (none expected) and findings
 """),
     md("""
 ## 3. Embedding quality

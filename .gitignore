@@ -54,3 +54,7 @@ results/
 writing/
 work/
 Paper citiation/
+
+# Decision-checks notebook: trained embeddings and executed copies
+checks/cache/
+checks/executed/

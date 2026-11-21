@@ -121,7 +121,6 @@ triple 567), whether or not a run tested it (`switch_tested`).
 | `drift_sphere.py` | one run: `--dataset --model --composition --version --retrain-policy` |
 | `run_grid.py` | runs a grid (rules of one version, `antoine`, `sensitivity`) N at a time, skips finished runs, chooses the Rule 3 sizes |
 | `run_all.sh` | every experiment in order, stage by stage |
-| `run_versions.sh` | everything planned for one version (older entry point) |
 | `import_old_runs.py` | reuses the earlier 10-epoch full-data runs as `v2_e10` |
 | `analyze.py` | tables, peak tables, literature tables, plots, version comparison |
 | `embedding_quality.py` | MRR / Hits@10 with the settings of a from-scratch version |

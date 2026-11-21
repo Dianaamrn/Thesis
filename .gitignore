@@ -45,3 +45,12 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Local only, never on GitHub (the repository is public): reports, papers, notes, history, results
+reports/
+literature/
+history/
+results/
+writing/
+work/
+Paper citiation/

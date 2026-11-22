@@ -15,14 +15,21 @@ Environment variables:
     NB_OUT        folder for everything the notebook saves   (default final_pipeline/output/<dataset>)
     NB_HELDOUT    1 = also run the held-out-baseline comparison (default: 1 on the cases, 0 on full)
     NB_REUSE_SETTINGS 1 = Part 3 loads phase1/settings_check results when they exist (default 1; same rule)
+    NB_PART       i/n = this execution runs only its share (every n-th) of the 40 runs and stops after Part 5
+
+Several runs at a time (e.g. 3): start three executions with NB_PART=1/3, 2/3, 3/3 (each in its own tmux window and
+with its own --output name). Part 1/3 also does Part 4 and the first embeddings; 2/3 and 3/3 wait for it. When all three
+have finished, run the notebook once more without NB_PART: every run is then loaded, and Parts 6-9 analyse them.
     NB_TEST       1 = smoke test: tiny trainings, random stand-in embedding in the stream, short stream
 Every expensive step saves its result and is skipped when the result exists, so a stopped run can be restarted.
 """
 import json
+import textwrap
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CELLS = []
+WRAP = False   # True for the cells after Part 5: skipped when the notebook only runs its share of the runs (NB_PART)
 
 
 def md(text):
@@ -30,7 +37,10 @@ def md(text):
 
 
 def code(text):
-    CELLS.append({'cell_type': 'code', 'metadata': {}, 'execution_count': None, 'outputs': [], 'source': text.strip('\n')})
+    text = text.strip('\n')
+    if WRAP:
+        text = 'if not RUNS_ONLY:   # skipped in the executions that only run their share of the runs (NB_PART)\n' + textwrap.indent(text, '    ')
+    CELLS.append({'cell_type': 'code', 'metadata': {}, 'execution_count': None, 'outputs': [], 'source': text})
 
 
 # =====================================================================================================
@@ -64,12 +74,14 @@ models, two compositions, four retraining rules and a warm-start re-embedding.
 | 2 | Data |
 | 3 | First embedding: learning rate and epochs (validation MRR) |
 | 4 | Every later re-embed: how many epochs (catastrophic forgetting over many updates) |
-| 5 | Checks of the method itself (baseline outlier rate, coordinate systems, data facts) |
-| 6 | The 40 runs |
-| 7 | Results: how many alarms and where |
-| 8 | Analysis: alarm density and peaks, with the triples behind them |
-| 9 | Comparison: baseline outlier rate measured in-sample (ADAZOR) vs on held-out data (cases) |
-| 10 | Summary |
+| 5 | The 40 runs |
+| 6 | Results: how many alarms and where |
+| 7 | Analysis: alarm density and peaks, with the triples behind them |
+| 8 | Comparison: baseline outlier rate measured in-sample (ADAZOR) vs on held-out data (cases) |
+| 9 | Summary |
+
+The checks of the method itself (where the baseline outlier rate is measured, re-embedding and coordinate systems, data
+facts) are in a separate notebook: `checks/decision_checks.ipynb`.
 
 The notebook is run once per dataset (`NB_DATASET=case1 | case2 | full`). Every expensive step saves its result in
 `final_pipeline/output/<dataset>/` and is skipped when the result exists.
@@ -152,10 +164,13 @@ MRR = {'learning_rates': [0.001, 0.01, 0.05], 'max_epochs': 100, 'every': 10, 'p
 # Part 4: later re-embeds (warm updates); limits fixed before measuring
 UPD = {'epochs': [1, 2, 3, 5, 10], 'lr_factors': [1.0],      # 1.0 = the first embedding's learning rate (0.2 = Wewer 2021)
        'max_updates': 30, 'mrr_at': [1, 10, 30], 'keep_old_mrr': 0.95, 'max_reference_rise': 0.05, 'tie': 0.01}
-PEAK = {'distance': S['window'], 'prominence': 0.05}          # Part 8: a peak = local maximum of the window outlier share
+PEAK = {'distance': S['window'], 'prominence': 0.05}          # Part 7: a peak = local maximum of the window outlier share
 
 RUN_HELDOUT = os.environ.get('NB_HELDOUT', '0' if DATASET == 'full' else '1') == '1'
 REUSE_SAVED = os.environ.get('NB_REUSE_SETTINGS', '1') == '1'   # Part 3: load phase1/settings_check results if present
+PART = os.environ.get('NB_PART')            # 'i/n': this execution runs only its share of the 40 runs (Part 5), then stops
+PART_I, PART_N = (int(x) for x in PART.split('/')) if PART else (1, 1)
+RUNS_ONLY = PART is not None
 EMBEDDER = 'pykeen'
 MAX_STREAM = None
 if TEST:                     # smoke test: tiny trainings, random stand-in vectors in the stream, short stream
@@ -342,7 +357,7 @@ numbers), fits the scaler and the one-class SVM, and flags outliers.
 
 `fit_reference` also decides **where the baseline outlier rate is measured**: `in_sample` = on the OCSVM's own training
 triples (ADAZOR, Algorithm 1); `held_out` = the OCSVM is fitted on one half of the reference and the rate is measured on
-the other half (used only in Part 9).
+the other half (used only in Part 8).
 """)
 code(r"""
 def features_of(subjects, relations, objects, emb, comp):
@@ -581,10 +596,10 @@ def equivalence_check():
     print('ALL IDENTICAL' if t['identical'].all() else 'DIFFERENCES FOUND')
 
 
-if DATASET == 'case1':
+if DATASET == 'case1' and not RUNS_ONLY:
     equivalence_check()
 else:
-    print('the equivalence check runs in the CASE1 execution')
+    print('the equivalence check runs in the CASE1 execution (without NB_PART)')
 """)
 
 # =====================================================================================================
@@ -607,7 +622,7 @@ show(pd.DataFrame([{'file rows': len(df), 'starting graph': len(start), 'undated
 """)
 
 md(r"""
-The next cell turns timestamps into dates, used by every plot and table of Parts 7–9.
+The next cell turns timestamps into dates, used by every plot and table of Parts 6–8.
 """)
 code(r"""
 def to_date(ts):
@@ -725,6 +740,26 @@ np.atleast_1d(axes)[0].set_ylabel('validation MRR'); np.atleast_1d(axes)[0].lege
 plt.tight_layout(); plt.show()
 """)
 
+md(r"""
+The next cell defines the first embedding used by the runs: the model trained on the **whole** starting graph with the
+chosen learning rate and epochs. It is trained once per model, saved, and shared by all runs of that model.
+""")
+code(r"""
+def first_embedding(model_name, seed=S['seed']):
+    f = OUT / 'first_embedding' / f'{model_name}__seed{seed}__state.pkl'
+    if f.exists():
+        return Embedding(**pickle.loads(f.read_bytes()))
+    ch = CHOSEN.get(model_name, {'lr': 0.001, 'epochs': 2})
+    if EMBEDDER == 'random':
+        st_ = random_embedding(START_KG.triples().astype(str), len(START_KG))
+    else:
+        tf = TriplesFactory.from_labeled_triples(START_KG.triples().astype(str)); t0 = time.time()
+        model = new_model(model_name, tf, seed); train_epochs(model, tf, ch['lr'], ch['epochs'])
+        st_ = state_from_model(model, tf, len(START_KG), time.time() - t0, keep_raw=True); del model
+    f.parent.mkdir(parents=True, exist_ok=True); f.write_bytes(pickle.dumps(vars(st_)))   # plain data, not the class
+    return st_
+""")
+
 # =====================================================================================================
 md(r"""
 # Part 4 — Every later re-embed: how many epochs?
@@ -750,15 +785,25 @@ marked.
 The next cell runs the sequence for every model and setting (saved per model and setting).
 """)
 code(r"""
+BASES = {}
+
+
+def base_for(model_name):
+    # The embedding the updates start from: trained once per model on the training part of the starting graph.
+    if model_name not in BASES:
+        ch = CHOSEN[model_name]
+        base = new_model(model_name, TRAIN); train_epochs(base, TRAIN, ch['lr'], ch['epochs'])
+        BASES[model_name] = (state_from_model(base, TRAIN, TRAIN.num_triples, 0.0, keep_raw=True), mrr_of(base, VALID_SAMPLE, KNOWN))
+        del base
+    return BASES[model_name]
+
+
 def update_sequence(model_name, e, lr):
     f = OUT / 'update_epochs' / f'{model_name}__e{e}__lr{lr:g}.json'
     if f.exists():
         return json.loads(f.read_text())
     f.parent.mkdir(parents=True, exist_ok=True)
-    ch = CHOSEN[model_name]
-    base = new_model(model_name, TRAIN); train_epochs(base, TRAIN, ch['lr'], ch['epochs'])
-    base_state = state_from_model(base, TRAIN, TRAIN.num_triples, 0.0, keep_raw=True)
-    base_mrr = mrr_of(base, VALID_SAMPLE, KNOWN); del base
+    base_state, base_mrr = base_for(model_name)
     ref_rows = [r for r in monitored_before.to_dict('records')[:-n_win]
                 if str(r['subject']) in base_state.entity_index and str(r['object']) in base_state.entity_index]
     if len(ref_rows) < 20:
@@ -799,6 +844,11 @@ def update_sequence(model_name, e, lr):
     return res
 
 
+DONE = OUT / 'update_epochs' / 'DONE'
+if RUNS_ONLY and PART_I != 1:
+    print('waiting for part 1 to finish Part 4 and the first embeddings ...', flush=True)
+    while not DONE.exists():
+        time.sleep(60)
 UPDATE_RESULTS = []
 for m in MODELS:
     for fac in UPD['lr_factors']:
@@ -811,6 +861,10 @@ for m in MODELS:
             print(f"{m:9s} {e:2d} epochs lr {r['lr']:<7g}: {len(r['updates'])} updates; last: old MRR {last.get('old_mrr', float('nan')):.4f} "
                   f"(first {r['base_mrr']:.4f}); reference outliers had {last.get('reference_outliers_hadamard', float('nan')):.2f} "
                   f"conc {last.get('reference_outliers_concatenation', float('nan')):.2f}")
+if not DONE.exists():   # train every first embedding now, so parallel executions can share them
+    for m in MODELS:
+        first_embedding(m)
+    DONE.parent.mkdir(parents=True, exist_ok=True); DONE.write_text('done')
 """)
 
 md(r"""
@@ -868,102 +922,13 @@ show(pd.DataFrame([{'model': m, 'composition': c, **v} for (m, c), v in WARM.ite
 
 # =====================================================================================================
 md(r"""
-# Part 5 — Checks of the method itself
-
-These checks are about the method, whatever the settings. They use TransE with the settings of Part 3.
-
-## 5.1 Where is the baseline outlier rate measured?
-
-In ADAZOR (Algorithm 1, line 4) the baseline outlier rate is measured on the OCSVM's own training triples. ν bounds the
-outlier share of the **training** points only (Schölkopf et al. 2001); unseen triples from the same distribution fall
-outside the boundary more often. The standard way is to measure on held-out data (Bates et al. 2023; Vovk et al. 2021;
-Lopez-Paz & Oquab 2016; Rabanser et al. 2018).
-
-The next cell trains TransE on the starting graph (twice, seeds 42 and 43, for 5.2) and runs the **no-drift test**: the
-monitored triples before the cutoff, one embedding, no re-embedding, shuffled and split 100 times into reference and
-window. Every alarm here is false. Baseline measured (a) in-sample, (b) on held-out half of the reference.
-""")
-code(r"""
-def first_embedding(model_name, seed=S['seed']):
-    f = OUT / 'first_embedding' / f'{model_name}__seed{seed}__state.pkl'
-    if f.exists():
-        return Embedding(**pickle.loads(f.read_bytes()))
-    ch = CHOSEN.get(model_name, {'lr': 0.001, 'epochs': 2})
-    if EMBEDDER == 'random':
-        st_ = random_embedding(START_KG.triples().astype(str), len(START_KG))
-    else:
-        from pykeen.triples import TriplesFactory as TFc
-        tf = TFc.from_labeled_triples(START_KG.triples().astype(str)); t0 = time.time()
-        model = new_model(model_name, tf, seed); train_epochs(model, tf, ch['lr'], ch['epochs'])
-        st_ = state_from_model(model, tf, len(START_KG), time.time() - t0, keep_raw=True); del model
-    f.parent.mkdir(parents=True, exist_ok=True); f.write_bytes(pickle.dumps(vars(st_)))   # plain data, not the class
-    return st_
-
-
-E1, E2 = first_embedding('TransE', 42), first_embedding('TransE', 43)
-init = monitored_before.to_dict('records'); REF, WIN = init[:-n_win], init[-n_win:]
-rows = []
-for comp in COMPOSITIONS:
-    X = features(init, E1, comp); n_ref, half = len(REF), len(REF) // 2
-    for rep in range(10 if TEST else 100):
-        perm = np.random.default_rng(rep).permutation(len(X)); Xr, Xw = X[perm[:n_ref]], X[perm[n_ref:]]
-        m_in, f_in = fit_reference(Xr, 'in_sample'); m_out, f_out = fit_reference(Xr, 'held_out', (np.arange(half), np.arange(half, n_ref)))
-        d_in, d_out = make_detector(), make_detector(); d_in.reset(f_in); d_out.reset(f_out)
-        rows.append({'composition': comp, 'baseline in-sample': f_in.mean(), 'window': outliers(m_in, Xw).mean(),
-                     'alarm in-sample': d_in.detect(outliers(m_in, Xw)), 'baseline held-out': f_out.mean(),
-                     'alarm held-out': d_out.detect(outliers(m_out, Xw))})
-B = pd.DataFrame(rows)
-show(B.groupby('composition').agg(**{'repeats': ('window', 'size'), 'baseline rate, in-sample': ('baseline in-sample', 'mean'),
-     'window rate (unseen)': ('window', 'mean'), 'false alarms in-sample (%)': ('alarm in-sample', lambda x: 100 * x.mean()),
-     'baseline rate, held-out': ('baseline held-out', 'mean'), 'false alarms held-out (%)': ('alarm held-out', lambda x: 100 * x.mean())}).round(3))
-""")
-
-md(r"""
-## 5.2 A cold re-embed changes the coordinate system
-
-The next cell scores the same triples with the OCSVM fitted under the first training (seed 42), using the vectors of the
-second training (seed 43) of the same graph. This is what a re-embed from scratch does; warm start avoids it.
-""")
-code(r"""
-shared = [e for e in E1.entity_index if e in E2.entity_index]
-cos = np.sum(E1.entity_matrix[[E1.entity_index[e] for e in shared]] * E2.entity_matrix[[E2.entity_index[e] for e in shared]], axis=1)
-print(f'same entity in the two trainings: mean cosine {cos.mean():.3f}')
-rows = []
-for comp in COMPOSITIONS:
-    m, _ = fit_reference(features(REF, E1, comp))
-    for label, rws, E in [('reference, first training (own training data)', REF, E1), ('first window, first training', WIN, E1),
-                          ('reference, second training', REF, E2), ('first window, second training', WIN, E2)]:
-        rows.append({'composition': comp, 'triples': label, 'outlier share': round(float(outliers(m, features(rws, E, comp)).mean()), 3)})
-show(pd.DataFrame(rows))
-""")
-
-md(r"""
-## 5.3 Data facts
-
-The next cell counts, in the starting graph: undated triples, stream entities known only through undated triples (if the
-undated facts are really from later, this is information from the future), and facts stored in both directions
-(reverse pairs; they make link-prediction MRR optimistic: Ali et al. 2020; Rossi et al. 2021).
-""")
-code(r"""
-und = start[start['event_year'].isna()]; dat = start[start['event_year'].notna()]
-n_und, n_dat = set(und.subject) | set(und.object), set(dat.subject) | set(dat.object)
-s_nodes = set(stream.subject) | set(stream.object)
-s_, o_ = start['subject'].astype(str).to_numpy(), start['object'].astype(str).to_numpy(); back = set(zip(o_, s_))
-rev = np.fromiter(((a, b) in back and a != b for a, b in zip(s_, o_)), dtype=bool, count=len(start))
-show(pd.DataFrame([{'starting graph': len(start), 'undated': len(und), 'undated share': round(len(und) / len(start), 3),
-                    'stream entities': len(s_nodes), 'known only through undated triples': len(s_nodes & n_und - n_dat),
-                    'new (cause a re-embed)': len(s_nodes - n_und - n_dat), 'rows with a reverse pair': int(rev.sum()),
-                    'of which monitored type': int((rev & start['type'].eq(D['type']).to_numpy()).sum())}]).T.rename(columns={0: DATASET}))
-""")
-
-# =====================================================================================================
-md(r"""
-# Part 6 — The 40 runs
+# Part 5 — The 40 runs
 
 The next cell runs the stream for every model, composition and rule, with the first embedding of Part 3 (trained once per
 model and shared by its runs) and the warm-update epochs of Part 4. R2 runs first: R3's sphere size k is set from R2's
 logged ratios (per composition, the 5 models pooled), so that R3 refits at about 50% of re-embeds. Each finished run is
-saved in `output/<dataset>/runs/` and skipped on a restart.
+saved in `output/<dataset>/runs/` and skipped on a restart. With `NB_PART=i/n` this execution runs only every n-th run
+(several executions in parallel), and R3 waits until all R2 runs exist.
 """)
 code(r"""
 def run_name(model, comp, rule, baseline):
@@ -976,6 +941,9 @@ def run_one(model, comp, rule_name, baseline='in_sample'):
         return
     rule = dict(RULES[rule_name])
     if 'share' in rule:
+        need = [OUT / 'runs' / run_name(m, comp, 'R2_always', 'in_sample') / 'summary.json' for m in MODELS]
+        while not all(x.exists() for x in need):   # R3's sphere size comes from the R2 runs (maybe running elsewhere)
+            time.sleep(60)
         rule['k'] = sphere_k(comp, rule['share'])
     ch = CHOSEN.get(model, {'lr': 0.001, 'epochs': 2}); wm = WARM.get((model, comp), {'epochs': 1, 'lr': ch['lr']})
     res = run_stream(DATA, model, comp, rule, first_embedding(model), ch['lr'], ch['epochs'], wm['epochs'], wm['lr'],
@@ -997,18 +965,21 @@ def sphere_k(comp, share):
 
 
 def run_grid(baseline='in_sample'):
-    for rule_name in RULES:
-        for model in MODELS:
-            for comp in COMPOSITIONS:
-                run_one(model, comp, rule_name, baseline)
+    grid = [(m, c, r) for r in RULES for m in MODELS for c in COMPOSITIONS]
+    for n, (model, comp, rule_name) in enumerate(grid):
+        if RUNS_ONLY and n % PART_N != PART_I - 1:
+            continue
+        run_one(model, comp, rule_name, baseline)
 
 
-t0 = time.time(); run_grid(); print(f'all runs done ({(time.time() - t0) / 60:.1f} min in this execution)')
+t0 = time.time(); run_grid()
+print(f"{'part ' + PART + ': my' if RUNS_ONLY else 'all'} runs done ({(time.time() - t0) / 60:.1f} min in this execution)")
 """)
+WRAP = True   # every code cell from here on is skipped in the NB_PART executions
 
 # =====================================================================================================
 md(r"""
-# Part 7 — Results: how many alarms and where
+# Part 6 — Results: how many alarms and where
 
 The next cell loads every run and shows, per run: alarms, re-embeds, refits by the rule, the share of the stream tested,
 the run time, and on the cases the alarms before and after the switch and the delay of the first alarm after it.
@@ -1090,7 +1061,7 @@ for rule_name in RULES:
 
 # =====================================================================================================
 md(r"""
-# Part 8 — Analysis: alarm density and peaks
+# Part 7 — Analysis: alarm density and peaks
 
 ## 8.1 Where the alarms pile up
 
@@ -1180,7 +1151,7 @@ if len(PEAKS):
 
 # =====================================================================================================
 md(r"""
-# Part 9 — Comparison: baseline outlier rate in-sample (ADAZOR) vs held-out
+# Part 8 — Comparison: baseline outlier rate in-sample (ADAZOR) vs held-out
 
 Only on the cases (they have a known change). The same 40 runs again, with one difference: the OCSVM is fitted on a
 random half of the reference and the baseline outlier rate is measured on the other half (also after every alarm).
@@ -1232,19 +1203,17 @@ if RUN_HELDOUT and SWITCH:
 
 # =====================================================================================================
 md(r"""
-# Part 10 — Summary
+# Part 9 — Summary
 
 The next cell collects the main numbers of this execution in one table: data sizes, chosen first-embedding settings,
-chosen warm-update epochs, the no-drift test, and the alarms per rule.
+chosen warm-update epochs, and the alarms per rule.
 """)
 code(r"""
 print('dataset:', DATASET, '| stream:', len(stream), '| switch:', SWITCH)
 print('\nfirst embedding (Part 3):'); show(pd.DataFrame(CHOSEN).T)
 print('\nwarm-update epochs (Part 4):'); show(pd.DataFrame([{'model': m, 'composition': c, **v} for (m, c), v in WARM.items()]))
-print('\nno-drift test (Part 5.1), false alarms %:')
-show(B.groupby('composition')[['alarm in-sample', 'alarm held-out']].mean().mul(100).round(1))
 if len(RESULTS):
-    print('\nalarms per rule (Part 7):')
+    print('\nalarms per rule (Part 6):')
     cols = ['alarms'] + (['alarms before switch', 'alarms after switch'] if SWITCH else [])
     show(RESULTS.groupby('rule')[cols].agg(['mean', 'min', 'max']).round(1))
 """)

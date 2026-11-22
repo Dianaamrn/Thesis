@@ -58,3 +58,7 @@ Paper citiation/
 # Decision-checks notebook: trained embeddings and executed copies
 checks/cache/
 checks/executed/
+
+# Final-pipeline notebook: everything it saves and its executed copies
+final_pipeline/output/
+final_pipeline/executed/

@@ -14,6 +14,7 @@ Environment variables:
     NB_DATA_DIR   folder with the data files                 (default <repo>/data)
     NB_OUT        folder for everything the notebook saves   (default final_pipeline/output/<dataset>)
     NB_HELDOUT    1 = also run the held-out-baseline comparison (default: 1 on the cases, 0 on full)
+    NB_REUSE_SETTINGS 1 = Part 3 loads phase1/settings_check results when they exist (default 1; same rule)
     NB_TEST       1 = smoke test: tiny trainings, random stand-in embedding in the stream, short stream
 Every expensive step saves its result and is skipped when the result exists, so a stopped run can be restarted.
 """
@@ -154,6 +155,7 @@ UPD = {'epochs': [1, 2, 3, 5, 10], 'lr_factors': [1.0],      # 1.0 = the first e
 PEAK = {'distance': S['window'], 'prominence': 0.05}          # Part 8: a peak = local maximum of the window outlier share
 
 RUN_HELDOUT = os.environ.get('NB_HELDOUT', '0' if DATASET == 'full' else '1') == '1'
+REUSE_SAVED = os.environ.get('NB_REUSE_SETTINGS', '1') == '1'   # Part 3: load phase1/settings_check results if present
 EMBEDDER = 'pykeen'
 MAX_STREAM = None
 if TEST:                     # smoke test: tiny trainings, random stand-in vectors in the stream, short stream
@@ -655,14 +657,25 @@ print(f'starting graph {TF.num_triples} triples, {TF.num_entities} entities; val
 """)
 
 md(r"""
-The next cell runs the rule for every model and learning rate (results are saved, so a restart skips what is done) and
-shows the validation MRR per learning rate and the chosen setting.
+The next cell applies the rule for every model and learning rate and shows the validation MRR per learning rate and the
+chosen setting. The same rule was already run by `phase1/settings_check.py` (same split, seed, validation triples,
+checks every 10 epochs, patience 2, 1% gain, at most 100 epochs, choice by best MRR); when its saved result exists it is
+loaded (marked "loaded"), otherwise it is computed here (marked "computed here"). `NB_REUSE_SETTINGS=0` forces computing.
 """)
 code(r"""
+SAVED = ROOT / 'phase1' / 'settings_check'      # results of phase1/settings_check.py (same rule, same split)
+
+
 def mrr_curve(model_name, lr):
     f = OUT / 'first_embedding' / f'{model_name}__lr{lr:g}.json'
     if f.exists():
         return json.loads(f.read_text())
+    saved = SAVED / f'{DATASET}__{model_name}__lr{lr:g}.json'
+    if REUSE_SAVED and saved.exists():
+        r = json.loads(saved.read_text())
+        return {'model': model_name, 'lr': lr, 'best_mrr': r['best_mrr'], 'best_epoch': r['best_epoch'],
+                'stopped_at': r['stopped_at_epoch'], 'seconds_per_epoch': r['seconds_per_epoch'], 'source': f'loaded: {saved.name}',
+                'curve': [{'epoch': c['epoch'], 'validation_mrr': c['mrr']} for c in r['curve']]}
     f.parent.mkdir(parents=True, exist_ok=True)
     model = new_model(model_name, TRAIN); loop, done, curve, best, best_ep, bad = None, 0, [], -1.0, 0, 0
     t0 = time.time()
@@ -678,7 +691,7 @@ def mrr_curve(model_name, lr):
             if bad >= MRR['patience']:
                 break
     res = {'model': model_name, 'lr': lr, 'best_mrr': best, 'best_epoch': best_ep, 'stopped_at': done,
-           'seconds_per_epoch': (time.time() - t0) / max(done, 1), 'curve': curve}
+           'seconds_per_epoch': (time.time() - t0) / max(done, 1), 'source': 'computed here', 'curve': curve}
     f.write_text(json.dumps(res)); del model
     return res
 
@@ -686,7 +699,8 @@ def mrr_curve(model_name, lr):
 rows = []
 for m in MODELS:
     for lr in MRR['learning_rates']:
-        r = mrr_curve(m, lr); print(f"{m:9s} lr {lr:<6g} best validation MRR {r['best_mrr']:.4f} at epoch {r['best_epoch']}")
+        r = mrr_curve(m, lr)
+        print(f"{m:9s} lr {lr:<6g} best validation MRR {r['best_mrr']:.4f} at epoch {r['best_epoch']}  ({r.get('source', '')})")
         rows.append(r)
 first_table = pd.DataFrame(rows)
 CHOSEN = {}

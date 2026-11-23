@@ -552,7 +552,7 @@ def run_stream(data, model_name, comp, rule, first, lr, epochs, warm_epochs, war
         fitted = {id(reference[j]) for j in split[0]} if split else set()
         refit()
     summary = {'stream_triples': len(stream), 'tested': len(history), 'alarms': len(alarms), 'reembeds': len(reembeds),
-               'refits_by_rule': int(sum(r['refit'] for r in reembeds if r['trigger'] == 'new entity')),
+               'refits_by_rule': int(sum(h['refitted'] for h in history)),   # between alarms, all rules (R4 included)
                'refill_triples': len(refills), 'minutes': round((time.time() - t_start) / 60, 2)}
     return {'summary': summary, 'history': pd.DataFrame(history), 'alarms': pd.DataFrame(alarms),
             'reembeds': pd.DataFrame(reembeds), 'refill': pd.DataFrame(refills)}
@@ -981,7 +981,8 @@ WRAP = True   # every code cell from here on is skipped in the NB_PART execution
 md(r"""
 # Part 6 — Results: how many alarms and where
 
-The next cell loads every run and shows, per run: alarms, re-embeds, refits by the rule, the share of the stream tested,
+The next cell loads every run and shows, per run: alarms, re-embeds, refits by the rule (between alarms; every rule also
+refits after each alarm), the share of the stream tested,
 the run time, and on the cases the alarms before and after the switch and the delay of the first alarm after it.
 """)
 code(r"""
@@ -1004,7 +1005,9 @@ rows = []
 for name, r in RUNS.items():
     s, a = r['summary'], r['alarms']; idx = list(a['stream_index']) if len(a) else []
     rec = {'model': s['model'], 'composition': s['composition'], 'rule': s['rule'], 'alarms': s['alarms'],
-           'first alarm at': idx[0] if idx else None, 're-embeds': s['reembeds'], 'refits by rule': s['refits_by_rule'],
+           'first alarm at': idx[0] if idx else None, 're-embeds': s['reembeds'],
+           # refits by the rule between alarms (R1/R2/R3 at a new entity, R4 on its schedule), counted from the history
+           'refits by rule': int(r['history']['refitted'].sum()) if len(r['history']) else 0,
            'tested share': round(s['tested'] / s['stream_triples'], 3), 'warm epochs': s['warm_epochs'], 'minutes': s['minutes']}
     if SWITCH:
         rec.update({'alarms before switch': sum(i < SWITCH for i in idx), 'alarms after switch': sum(i >= SWITCH for i in idx),

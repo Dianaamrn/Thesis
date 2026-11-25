@@ -1,0 +1,94 @@
+MONDO roots: cancer | infectious disease
+
+====================================================================================================
+case1: file filtered_drifting_edgesCASE1.tsv, cutoff 2002, monitored Gene - causes_or_contributes_to_condition - Disease, switch 2005
+file rows 400,253; triple types 145; undated rows 328,456; years 1972-2025
+starting graph rows 330,740; undated in it 328,456; types 140
+monitored: reference 256, first window 250, stream before switch 566, stream from switch 197
+  monitored up to cutoff: undated 0, years 1979-2002; reference years 1979-2000, first window years 2000-2002
+  unique subjects: reference 31, first window 54, stream before switch 68, stream from switch 121
+     overlaps: reference&first wind 9; reference&stream bef 5; reference&stream fro 7; first wind&stream bef 10; first wind&stream fro 8; stream bef&stream fro 5
+     stream before switch: in starting graph at all 31/68; of those, only via other types (not in monitored before cutoff) 19
+     stream from switch: in starting graph at all 47/121; of those, only via other types (not in monitored before cutoff) 36
+  unique objects (diseases): reference 181, first window 110, stream before switch 193, stream from switch 56
+     overlaps: reference&first wind 52; reference&stream bef 107; reference&stream fro 0; first wind&stream bef 73; first wind&stream fro 0; stream bef&stream fro 0
+     stream before switch: in starting graph at all 147/193; of those, only via other types (not in monitored before cutoff) 6
+     stream from switch: in starting graph at all 0/56; of those, only via other types (not in monitored before cutoff) 0
+  stream before switch: triples with an unseen subject or object at arrival 81/566 (0.14)
+  stream from switch: triples with an unseen subject or object at arrival 113/197 (0.57)
+  starting-graph degree, reference: subject median 32, object median 3, objects with degree 0 0.00
+  starting-graph degree, first window: subject median 10, object median 4, objects with degree 0 0.00
+  starting-graph degree, stream before switch: subject median 0, object median 3, objects with degree 0 0.11
+  starting-graph degree, stream from switch: subject median 0, object median 0, objects with degree 0 1.00
+  stream dates: distinct 119, triples per date median 2, max 73 (on 1094083200.0), share of triples on dates with >=50 triples 0.17
+  stream per year: 2003 144, 2004 422, 2005 6, 2006 18, 2007 11, 2009 6, 2010 13, 2011 21, 2012 3, 2013 61, 2014 4, 2015 2, 2016 11, 2017 23, 2018 5, 2020 7, 2021 4, 2022 2
+  disease category, reference: cancer 0.52, other 0.48  (n=256)
+  disease category, first window: cancer 0.73, other 0.27  (n=250)
+  disease category, stream before switch: cancer 0.73, other 0.27  (n=566)
+  disease category, stream from switch: infectious 0.88, other 0.12  (n=197)
+
+====================================================================================================
+case2: file filtered_drifting_edgesCASE2.tsv, cutoff 2018, monitored miRNA - causes_or_contributes_to_condition - Disease, switch 2022
+file rows 402,019; triple types 145; undated rows 328,456; years 1972-2025
+starting graph rows 369,719; undated in it 328,456; types 143
+monitored: reference 226, first window 250, stream before switch 1,020, stream from switch 2,809
+  monitored up to cutoff: undated 0, years 2005-2018; reference years 2005-2014, first window years 2014-2018
+  unique subjects: reference 98, first window 73, stream before switch 387, stream from switch 809
+     overlaps: reference&first wind 33; reference&stream bef 47; reference&stream fro 52; first wind&stream bef 59; first wind&stream fro 58; stream bef&stream fro 252
+     stream before switch: in starting graph at all 387/387; of those, only via other types (not in monitored before cutoff) 310
+     stream from switch: in starting graph at all 809/809; of those, only via other types (not in monitored before cutoff) 728
+  unique objects (diseases): reference 20, first window 21, stream before switch 79, stream from switch 161
+     overlaps: reference&first wind 9; reference&stream bef 11; reference&stream fro 0; first wind&stream bef 18; first wind&stream fro 0; stream bef&stream fro 0
+     stream before switch: in starting graph at all 28/79; of those, only via other types (not in monitored before cutoff) 6
+     stream from switch: in starting graph at all 0/161; of those, only via other types (not in monitored before cutoff) 0
+  stream before switch: triples with an unseen subject or object at arrival 51/1020 (0.05)
+  stream from switch: triples with an unseen subject or object at arrival 161/2809 (0.06)
+  starting-graph degree, reference: subject median 189, object median 74, objects with degree 0 0.00
+  starting-graph degree, first window: subject median 189, object median 85, objects with degree 0 0.00
+  starting-graph degree, stream before switch: subject median 137, object median 1, objects with degree 0 0.47
+  starting-graph degree, stream from switch: subject median 73, object median 0, objects with degree 0 1.00
+  stream dates: distinct 797, triples per date median 2, max 157 (on 1640995200.0), share of triples on dates with >=50 triples 0.11
+  stream per year: 2019 167, 2020 427, 2021 426, 2022 2543, 2023 262, 2024 2, 2025 2
+  disease category, reference: infectious 1.00, other 0.00  (n=226)
+  disease category, first window: infectious 0.98, other 0.02  (n=250)
+  disease category, stream before switch: infectious 0.98, other 0.02  (n=1020)
+  disease category, stream from switch: cancer 0.73, other 0.27  (n=2809)
+
+====================================================================================================
+full: file drifting_edges_timestamp.tsv, cutoff 2010, monitored Gene - causes_or_contributes_to_condition - Disease, switch None
+file rows 1,720,901; triple types 182; undated rows 1,303,194; years 1950-2025
+starting graph rows 1,428,493; undated in it 1,303,194; types 181
+monitored: reference 22,936, first window 250, stream 13,294
+  monitored up to cutoff: undated 9565, years 1968-2010; reference years 1968-2010, first window years 2010-2010
+  unique subjects: reference 1914, first window 60, stream 1854
+     overlaps: reference&first wind 47; reference&stream 824; first wind&stream 38
+     stream: in starting graph at all 1022/1854; of those, only via other types (not in monitored before cutoff) 193
+  unique objects (diseases): reference 3884, first window 147, stream 1983
+     overlaps: reference&first wind 137; reference&stream 1528; first wind&stream 112
+     stream: in starting graph at all 1983/1983; of those, only via other types (not in monitored before cutoff) 454
+  stream: triples with an unseen subject or object at arrival 832/13294 (0.06)
+  starting-graph degree, reference: subject median 39, object median 114, objects with degree 0 0.00
+  starting-graph degree, first window: subject median 23, object median 65, objects with degree 0 0.00
+  starting-graph degree, stream: subject median 4, object median 98, objects with degree 0 0.00
+  stream dates: distinct 1060, triples per date median 5, max 264 (on 1522627200.0), share of triples on dates with >=50 triples 0.37
+  stream per year: 2011 1814, 2012 1368, 2013 1455, 2014 1181, 2015 1123, 2016 1166, 2017 1259, 2018 1483, 2019 736, 2020 233, 2021 403, 2022 1002, 2023 41, 2024 30
+  disease category, reference: other 0.77, cancer 0.22, infectious 0.01  (n=22936)
+  disease category, first window: other 0.82, cancer 0.18  (n=250)
+  disease category, stream: other 0.64, cancer 0.35, infectious 0.01  (n=13294)
+  full stream, category share per year:
+c       cancer  infectious  other
+y                                
+2011.0    0.35        0.01   0.64
+2012.0    0.21        0.00   0.78
+2013.0    0.26        0.05   0.69
+2014.0    0.37        0.00   0.62
+2015.0    0.27        0.01   0.72
+2016.0    0.39        0.01   0.60
+2017.0    0.53        0.02   0.45
+2018.0    0.48        0.00   0.52
+2019.0    0.31        0.00   0.69
+2020.0    0.21        0.04   0.75
+2021.0    0.23        0.01   0.76
+2022.0    0.37        0.00   0.63
+2023.0    0.15        0.00   0.85
+2024.0    0.33        0.00   0.67

@@ -43,6 +43,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import scipy.stats as st
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 
@@ -130,13 +131,23 @@ def scorable(rows, emb):
     return rows['subject'].astype(str).isin(e) & rows['object'].astype(str).isin(e) & rows['edge_type'].astype(str).isin(r)
 
 
-def fit_ocsvm(X):   # as the final pipeline (build_notebook.py, fit_ocsvm)
+def fit_ocsvm(X, k='none'):
+    """As the final pipeline (build_notebook.py, fit_ocsvm): StandardScaler + OCSVM. With k (idea 1, 25 Nov): the
+    features are first standardised and projected on their first k principal components (PCA fitted on X only)."""
+    steps = []
+    if k != 'none':
+        sc = StandardScaler().fit(X)
+        steps = [sc, PCA(n_components=int(k), random_state=SEED).fit(sc.transform(X))]
+    for s in steps:
+        X = s.transform(X)
     scaler = StandardScaler().fit(X)
-    return scaler, OneClassSVM(kernel='rbf', nu=0.1, gamma='scale').fit(scaler.transform(X))
+    return steps, scaler, OneClassSVM(kernel='rbf', nu=0.1, gamma='scale').fit(scaler.transform(X))
 
 
 def score(model, X):
-    scaler, svm = model
+    steps, scaler, svm = model
+    for s in steps:
+        X = s.transform(X)
     Z = scaler.transform(X)
     return svm.predict(Z) == -1, svm.decision_function(Z)
 
@@ -150,8 +161,10 @@ def main(argv=None):
     ap.add_argument('--models', nargs='+', default=MODELS)
     ap.add_argument('--compositions', nargs='+', default=COMPOSITIONS)
     ap.add_argument('--embedder', default='saved', choices=['saved', 'random'])
+    ap.add_argument('--pca', nargs='+', default=['none'], help="idea 1: 'none' and/or numbers of principal components")
     a = ap.parse_args(argv)
-    out = OUT / ('TEST_random' if a.embedder == 'random' else '')
+    a.pca = [x if x == 'none' else int(x) for x in a.pca]
+    out = OUT / ('TEST_random' if a.embedder == 'random' else '') / ('' if a.pca == ['none'] else 'pca')
     out.mkdir(parents=True, exist_ok=True)
 
     log('loading the full data (pipeline loader and split)')
@@ -169,15 +182,15 @@ def main(argv=None):
         r = ref[ref_ok].reset_index(drop=True)
         log(f'{model}: scorable stream triples {len(s):,} of {len(stream):,} (cancer {int(s["cancer"].sum()):,}, '
             f'non-cancer {int((~s["cancer"]).sum()):,}); reference with vectors {len(r):,} of {len(ref):,}')
-        for comp in a.compositions:
+        for comp, k in [(c, k) for c in a.compositions for k in a.pca]:
             t0 = time.time()
             X_ref, X_s = features(r, emb, comp), features(s, emb, comp)
-            svm = fit_ocsvm(X_ref)
+            svm = fit_ocsvm(X_ref, k)
             fit_s = time.time() - t0
             in_flags, _ = score(svm, X_ref)
             perm = np.random.default_rng(SEED).permutation(len(r))   # held-out baseline: as make_split in the pipeline
             fit_idx, cal_idx = perm[: len(r) // 2], perm[len(r) // 2:]
-            ho_flags, _ = score(fit_ocsvm(X_ref[fit_idx]), X_ref[cal_idx])
+            ho_flags, _ = score(fit_ocsvm(X_ref[fit_idx], k), X_ref[cal_idx])
             flags, dec = score(svm, X_s)
             canc = s['cancer'].to_numpy()
             rng = np.random.default_rng(SEED)
@@ -192,12 +205,12 @@ def main(argv=None):
             nb = len(s) // W
             for b in range(nb):
                 sl = slice(b * W, (b + 1) * W)
-                block_rows.append({'model': model, 'composition': comp, 'block': b + 1,
+                block_rows.append({'model': model, 'composition': comp, 'pca': k, 'block': b + 1,
                                    'first_year': int(s['event_year'].iloc[sl.start]), 'last_year': int(s['event_year'].iloc[sl.stop - 1]),
                                    'outlier_share': float(flags[sl].mean()), 'cancer_share': float(canc[sl].mean())})
-            cb = pd.DataFrame([x for x in block_rows if x['model'] == model and x['composition'] == comp])
+            cb = pd.DataFrame([x for x in block_rows if x['model'] == model and x['composition'] == comp and x['pca'] == k])
             rho = st.spearmanr(cb['outlier_share'], cb['cancer_share']).correlation if len(cb) > 2 else np.nan
-            row = {'model': model, 'composition': comp, 'reference': len(r), 'scorable_stream': len(s),
+            row = {'model': model, 'composition': comp, 'pca': k, 'reference': len(r), 'scorable_stream': len(s),
                    'baseline_in_sample': round(float(in_flags.mean()), 3), 'baseline_held_out': round(float(ho_flags.mean()), 3),
                    'stream_outlier_share_all': round(float(flags.mean()), 3),
                    'A_mean_noncancer': round(float(m0), 3), 'A_p2.5': round(float(np.percentile(A, 2.5)), 3),
@@ -208,7 +221,7 @@ def main(argv=None):
                    'decision_mean_noncancer': round(float(dec[~canc].mean()), 4), 'decision_mean_cancer': round(float(dec[canc].mean()), 4),
                    'fit_seconds': round(fit_s, 1)}
             rows.append(row)
-            log(f'  {comp}: in-sample {row["baseline_in_sample"]}, held-out {row["baseline_held_out"]}; A {row["A_mean_noncancer"]} '
+            log(f'  {comp} pca {k}: in-sample {row["baseline_in_sample"]}, held-out {row["baseline_held_out"]}; A {row["A_mean_noncancer"]} '
                 f'[{row["A_p2.5"]}, {row["A_p97.5"]}], B {row["B_mean_cancer"]} (B-A {row["B_minus_A"]}, beyond line {row["B_share_beyond_line"]}) '
                 f'-> {verdict}; C rho {row["C_spearman_outlier_vs_cancer"]} ({nb} blocks); fit {fit_s:.0f} s')
             pd.DataFrame(rows).to_csv(out / 'full_bench_table.csv', index=False)          # saved after every row
@@ -222,13 +235,13 @@ def main(argv=None):
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         blocks = pd.DataFrame(block_rows)
-        keys = list(table[['model', 'composition']].itertuples(index=False, name=None))
+        keys = list(table[['model', 'composition', 'pca']].itertuples(index=False, name=None))
         fig, axes = plt.subplots(len(keys), 1, figsize=(11, 1.9 * len(keys)), sharex=True, squeeze=False)
-        for ax, (m, c) in zip(axes[:, 0], keys):
-            b = blocks[blocks.model.eq(m) & blocks.composition.eq(c)]
+        for ax, (m, c, k) in zip(axes[:, 0], keys):
+            b = blocks[blocks.model.eq(m) & blocks.composition.eq(c) & (blocks.pca.astype(str) == str(k))]
             ax.plot(b['block'], b['outlier_share'], color='#2a78d6', lw=1.2, label='outlier share')
             ax.plot(b['block'], b['cancer_share'], color='#b4452f', lw=1.0, ls='--', label='cancer share')
-            ax.set_ylim(0, 1); ax.set_title(f'{m} · {c}', fontsize=8, loc='left')
+            ax.set_ylim(0, 1); ax.set_title(f'{m} · {c} · pca {k}', fontsize=8, loc='left')
         axes[0, 0].legend(fontsize=7, loc='upper right'); axes[-1, 0].set_xlabel('block of 250 stream triples, in time order')
         plt.tight_layout(); fig.savefig(out / 'full_bench_time_blocks.png', dpi=120)
     except Exception as e:  # the figure is a convenience; the tables are the result

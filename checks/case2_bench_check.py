@@ -47,10 +47,14 @@ from sklearn.svm import OneClassSVM
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'phase1'))
-sys.path.insert(0, str(ROOT / 'checks'))
 import configs  # noqa: E402
 import drift_sphere as ds  # noqa: E402
-from separability_check import training_cfg  # noqa: E402
+
+
+def training_cfg(dataset, model, embedder, device):
+    # as checks/separability_check.py (training_cfg, from scratch): Phase 1 learning rate and epochs per model
+    return {**configs.training_settings('phase1', dataset, model), 'model': model, 'embedder': embedder,
+            'device': device, 'embed_update': 'scratch'}
 
 SEED = 42
 ALPHA = 0.025

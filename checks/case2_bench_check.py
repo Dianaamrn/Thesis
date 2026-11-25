@@ -71,16 +71,18 @@ def log(msg):
 
 def make_svm(X_ref, k):
     """The pipeline's StandardScaler + OCSVM, with an optional PCA step (fitted on the reference) before it."""
-    steps = []
+    steps, used = [], 'none'
     if k != 'none':
         sc = StandardScaler().fit(X_ref)
-        pca = PCA(n_components=int(k), random_state=SEED).fit(sc.transform(X_ref))
-        steps = [sc, pca]
+        # 'v90' = the smallest number of components that keeps 90% of the reference's variance (fixed 25 Nov,
+        # before the confirmation run); otherwise k components
+        pca = PCA(n_components=0.90 if k == 'v90' else int(k), svd_solver='full', random_state=SEED).fit(sc.transform(X_ref))
+        steps, used = [sc, pca], int(pca.n_components_)
     pre = lambda X: _apply(steps, X)
     Z = pre(X_ref)
     scaler = StandardScaler().fit(Z)
     svm = OneClassSVM(kernel='rbf', nu=0.1, gamma='scale').fit(scaler.transform(Z))
-    return lambda X: svm.predict(scaler.transform(pre(X))) == -1
+    return (lambda X: svm.predict(scaler.transform(pre(X))) == -1), used
 
 
 def _apply(steps, X):
@@ -128,6 +130,8 @@ def main(argv=None):
     ap.add_argument('--models', nargs='+', default=MODELS)
     ap.add_argument('--embedder', default='pykeen', choices=['pykeen', 'random'])
     ap.add_argument('--device', default=None)
+    ap.add_argument('--pca', nargs='+', default=PCA_K, help="'none', 'v90' (90%% of the variance) and/or numbers")
+    ap.add_argument('--from-features', action='store_true', help='reuse the features saved by an earlier run (no training)')
     a = ap.parse_args(argv)
     if a.device is None:
         try:
@@ -135,7 +139,9 @@ def main(argv=None):
             a.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         except ImportError:
             a.device = 'cpu'
-    out = OUT / ('control_random' if a.embedder == 'random' else '')
+    a.pca = [x if x in ('none', 'v90') else int(x) for x in a.pca]
+    base = OUT / ('control_random' if a.embedder == 'random' else '')
+    out = base / ('' if a.pca == PCA_K else 'pca_' + '_'.join(map(str, a.pca)))
     (out / 'features').mkdir(parents=True, exist_ok=True)
 
     d = configs.DATASETS['case2']
@@ -148,18 +154,23 @@ def main(argv=None):
 
     rows, block_rows = [], []
     for model in a.models:
-        t0 = time.time()
-        state, used = embed(initial_kg, stream, model, a.embedder, a.device)
-        log(f'{model}: embedding trained on {used} in {(time.time() - t0) / 60:.1f} min')
+        state = None
+        if not a.from_features:
+            t0 = time.time()
+            state, used = embed(initial_kg, stream, model, a.embedder, a.device)
+            log(f'{model}: embedding trained on {used} in {(time.time() - t0) / 60:.1f} min')
         for comp in COMPOSITIONS:
-            X_ref, X_s = ds.rows_to_features(ref_rows, state, comp), ds.rows_to_features(s_rows, state, comp)
-            np.savez_compressed(out / 'features' / f'{model}__{comp}.npz', reference=X_ref, stream=X_s)
-            for k in PCA_K:
-                flag = make_svm(X_ref, k)
+            if a.from_features:
+                f = np.load(base / 'features' / f'{model}__{comp}.npz'); X_ref, X_s = f['reference'], f['stream']
+            else:
+                X_ref, X_s = ds.rows_to_features(ref_rows, state, comp), ds.rows_to_features(s_rows, state, comp)
+                np.savez_compressed(out / 'features' / f'{model}__{comp}.npz', reference=X_ref, stream=X_s)
+            for k in a.pca:
+                flag, k_used = make_svm(X_ref, k)
                 in_rate = float(flag(X_ref).mean())
                 perm = np.random.default_rng(SEED).permutation(len(X_ref))
                 h = len(X_ref) // 2
-                ho_rate = float(make_svm(X_ref[perm[:h]], k)(X_ref[perm[h:]]).mean())
+                ho_rate = float(make_svm(X_ref[perm[:h]], k)[0](X_ref[perm[h:]]).mean())
                 flags = flag(X_s)
                 pre, post = blocks(flags, 250, switch)
                 v, m0, share = verdict(pre, post, line(250))
@@ -169,14 +180,14 @@ def main(argv=None):
                     block_rows.append({'model': model, 'composition': comp, 'pca': k, 'period': 'before', 'block': i + 1, 'outlier_share': float(x)})
                 for i, x in enumerate(post):
                     block_rows.append({'model': model, 'composition': comp, 'pca': k, 'period': 'after', 'block': i + 1, 'outlier_share': float(x)})
-                row = {'model': model, 'composition': comp, 'pca': k, 'baseline_in_sample': round(in_rate, 3),
+                row = {'model': model, 'composition': comp, 'pca': k, 'components': k_used, 'baseline_in_sample': round(in_rate, 3),
                        'baseline_held_out': round(ho_rate, 3), 'pre_blocks': len(pre), 'post_blocks': len(post),
                        'pre_mean': round(float(m0), 3), 'pre_min': round(float(pre.min()), 3), 'pre_max': round(float(pre.max()), 3),
                        'post_mean': round(float(post.mean()), 3), 'post_minus_pre': round(float(post.mean() - m0), 3),
                        'post_share_beyond_line': round(share, 3), 'verdict': v,
                        'verdict_blocks100': v100, 'post_share_beyond_line_100': round(share100, 3)}
                 rows.append(row)
-                log(f'  {comp:13s} pca {str(k):4s}: baseline {row["baseline_in_sample"]}/{row["baseline_held_out"]}; '
+                log(f'  {comp:13s} pca {str(k):4s} ({k_used} comp.): baseline {row["baseline_in_sample"]}/{row["baseline_held_out"]}; '
                     f'before {row["pre_mean"]} [{row["pre_min"]}, {row["pre_max"]}], after {row["post_mean"]} '
                     f'(diff {row["post_minus_pre"]}, beyond line {row["post_share_beyond_line"]}) -> {v}  | blocks of 100: {v100}')
                 pd.DataFrame(rows).to_csv(out / 'case2_bench_table.csv', index=False)          # saved after every row

@@ -137,7 +137,8 @@ def fit_ocsvm(X, k='none'):
     steps = []
     if k != 'none':
         sc = StandardScaler().fit(X)
-        steps = [sc, PCA(n_components=int(k), random_state=SEED).fit(sc.transform(X))]
+        # 'v90' = the smallest number of components that keeps 90% of the reference's variance (fixed 25 Nov)
+        steps = [sc, PCA(n_components=0.90 if k == 'v90' else int(k), svd_solver='full', random_state=SEED).fit(sc.transform(X))]
     for s in steps:
         X = s.transform(X)
     scaler = StandardScaler().fit(X)
@@ -163,8 +164,8 @@ def main(argv=None):
     ap.add_argument('--embedder', default='saved', choices=['saved', 'random'])
     ap.add_argument('--pca', nargs='+', default=['none'], help="idea 1: 'none' and/or numbers of principal components")
     a = ap.parse_args(argv)
-    a.pca = [x if x == 'none' else int(x) for x in a.pca]
-    out = OUT / ('TEST_random' if a.embedder == 'random' else '') / ('' if a.pca == ['none'] else 'pca')
+    a.pca = [x if x in ('none', 'v90') else int(x) for x in a.pca]
+    out = OUT / ('TEST_random' if a.embedder == 'random' else '') / ('' if a.pca == ['none'] else 'pca' if a.pca == [8, 16, 32] else 'pca_' + '_'.join(map(str, a.pca)))
     out.mkdir(parents=True, exist_ok=True)
 
     log('loading the full data (pipeline loader and split)')
@@ -210,7 +211,7 @@ def main(argv=None):
                                    'outlier_share': float(flags[sl].mean()), 'cancer_share': float(canc[sl].mean())})
             cb = pd.DataFrame([x for x in block_rows if x['model'] == model and x['composition'] == comp and x['pca'] == k])
             rho = st.spearmanr(cb['outlier_share'], cb['cancer_share']).correlation if len(cb) > 2 else np.nan
-            row = {'model': model, 'composition': comp, 'pca': k, 'reference': len(r), 'scorable_stream': len(s),
+            row = {'model': model, 'composition': comp, 'pca': k, 'components': int(svm[0][1].n_components_) if svm[0] else 'none', 'reference': len(r), 'scorable_stream': len(s),
                    'baseline_in_sample': round(float(in_flags.mean()), 3), 'baseline_held_out': round(float(ho_flags.mean()), 3),
                    'stream_outlier_share_all': round(float(flags.mean()), 3),
                    'A_mean_noncancer': round(float(m0), 3), 'A_p2.5': round(float(np.percentile(A, 2.5)), 3),
@@ -221,7 +222,7 @@ def main(argv=None):
                    'decision_mean_noncancer': round(float(dec[~canc].mean()), 4), 'decision_mean_cancer': round(float(dec[canc].mean()), 4),
                    'fit_seconds': round(fit_s, 1)}
             rows.append(row)
-            log(f'  {comp} pca {k}: in-sample {row["baseline_in_sample"]}, held-out {row["baseline_held_out"]}; A {row["A_mean_noncancer"]} '
+            log(f'  {comp} pca {k} ({row["components"]} comp.): in-sample {row["baseline_in_sample"]}, held-out {row["baseline_held_out"]}; A {row["A_mean_noncancer"]} '
                 f'[{row["A_p2.5"]}, {row["A_p97.5"]}], B {row["B_mean_cancer"]} (B-A {row["B_minus_A"]}, beyond line {row["B_share_beyond_line"]}) '
                 f'-> {verdict}; C rho {row["C_spearman_outlier_vs_cancer"]} ({nb} blocks); fit {fit_s:.0f} s')
             pd.DataFrame(rows).to_csv(out / 'full_bench_table.csv', index=False)          # saved after every row

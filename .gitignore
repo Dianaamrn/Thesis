@@ -62,3 +62,8 @@ checks/executed/
 # Final-pipeline notebook: everything it saves and its executed copies
 final_pipeline/output/
 final_pipeline/executed/
+
+# antoine_grid: run outputs and executed notebooks (local / server only)
+antoine_grid/runs/
+antoine_grid/runs_TEST/
+antoine_grid/executed/

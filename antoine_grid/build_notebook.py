@@ -13,6 +13,7 @@ Environment variables:
     AG_COMPS        compositions, comma separated (default hadamard)
     AG_GPU_SLOTS    runs at the same time on the GPU (default 2)
     AG_CPU_SLOTS    runs at the same time on the CPU (default 0)
+    AG_CPU_THREADS  threads per CPU run (default 2)
     AG_TEST         1 = smoke test (random stand-in embedding, first 600 stream triples)
 Finished runs are skipped, so the notebook can be executed again (e.g. after runs were added from another machine):
 it then only analyses.
@@ -99,8 +100,8 @@ md(r"""
 ## 1. Running one run
 
 `run_one` starts `phase1/drift_sphere.py` for one model, composition and rule, with Antoine's preset and the scaling of this
-execution, and writes the run's log next to its results. A run that is already finished is skipped. If a GPU run fails for
-lack of GPU memory (the GPU is shared), it is repeated on the CPU and marked.
+execution, and writes the run's log next to its results. A run that is already finished is skipped. If a GPU run fails (e.g. for
+lack of memory: the GPU is shared), it is repeated on the CPU and marked; CPU runs do not see the GPU at all.
 """)
 code(r"""
 def run_name(model, comp, rule):
@@ -121,6 +122,9 @@ def command(model, comp, rule, k, device):
     return cmd
 
 
+CPU_THREADS = os.environ.get('AG_CPU_THREADS', '2')
+ENV = {'cuda': dict(os.environ),   # CPU runs do not see the GPU at all, and use a few threads each
+       'cpu': {**os.environ, 'CUDA_VISIBLE_DEVICES': '', 'OMP_NUM_THREADS': CPU_THREADS, 'MKL_NUM_THREADS': CPU_THREADS}}
 LOCK = threading.Lock()
 SLOTS = ['cuda'] * GPU_SLOTS + ['cpu'] * CPU_SLOTS
 FREE = list(SLOTS)
@@ -137,13 +141,12 @@ def run_one(job):
         d.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
         with open(d / 'run.log', 'w') as log:
-            rc = subprocess.call(command(model, comp, rule, k, device), stdout=log, stderr=subprocess.STDOUT, cwd=str(ROOT))
-        text = (d / 'run.log').read_text(errors='ignore')
-        if rc != 0 and device == 'cuda' and 'out of memory' in text.lower():
-            (d / 'run_gpu_oom.log').write_text(text)
+            rc = subprocess.call(command(model, comp, rule, k, device), stdout=log, stderr=subprocess.STDOUT, cwd=str(ROOT), env=ENV[device])
+        if rc != 0 and device == 'cuda':   # e.g. out of GPU memory (the GPU is shared): repeat on the CPU
+            (d / 'run_gpu_failed.log').write_text((d / 'run.log').read_text(errors='ignore'))
             with open(d / 'run.log', 'w') as log:
-                rc = subprocess.call(command(model, comp, rule, k, 'cpu'), stdout=log, stderr=subprocess.STDOUT, cwd=str(ROOT))
-            device = 'cpu (after GPU out of memory)'
+                rc = subprocess.call(command(model, comp, rule, k, 'cpu'), stdout=log, stderr=subprocess.STDOUT, cwd=str(ROOT), env=ENV['cpu'])
+            device = 'cpu (after a GPU failure)'
         status = f'{"ok" if rc == 0 else "FAILED rc=" + str(rc)} on {device}, {(time.time() - t0) / 60:.1f} min'
         print(f'{time.strftime("%H:%M")} {run_name(model, comp, rule)}: {status}', flush=True)
         return model, comp, rule, status

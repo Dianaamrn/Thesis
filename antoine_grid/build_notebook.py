@@ -203,10 +203,14 @@ def load(name):
         return None
     s = json.loads((d / 'summary.json').read_text())
     s['device'] = json.loads((d / 'config.json').read_text()).get('device', '')
-    dr = pd.read_csv(d / 'drifts.tsv', sep='\t') if (d / 'drifts.tsv').stat().st_size > 1 else pd.DataFrame()
-    wh = pd.read_csv(d / 'window_history.tsv.gz', sep='\t')
-    st = pd.read_csv(d / 'step_trace.tsv.gz', sep='\t')
-    return s, dr, wh, st
+    return s, read(d / 'drifts.tsv'), read(d / 'window_history.tsv.gz'), read(d / 'step_trace.tsv.gz')
+
+
+def read(f):
+    try:
+        return pd.read_csv(f, sep='\t')
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
 
 
 RUNS, rows = {}, []
@@ -225,8 +229,8 @@ for c in COMPOSITIONS:
             rows.append({'model': m, 'composition': c, 'rule': r, 'drifts': s['num_detected_drifts'], 'up': up,
                          'down': s['num_detected_drifts'] - up, 're-embeds': s['num_embedding_refresh_events'],
                          'refits by rule': refits, 'tested': s['tested_steps'],
-                         'mean window share': round(float(wh['current_outlier_fraction'].mean()), 3),
-                         'mean baseline': round(float(wh['reference_outlier_fraction'].mean()), 3),
+                         'mean window share': round(float(wh['current_outlier_fraction'].mean()), 3) if len(wh) else None,
+                         'mean baseline': round(float(wh['reference_outlier_fraction'].mean()), 3) if len(wh) else None,
                          'k': s.get('sphere_k'), 'device': s.get('device', ''), 'minutes': round(s['runtime_seconds'] / 60, 1)})
 RESULTS = pd.DataFrame(rows)
 RESULTS
@@ -248,6 +252,8 @@ if keys:
     fig, axes = plt.subplots(len(keys), 1, figsize=(12, 1.6 * len(keys)), sharex=True, squeeze=False)
     for ax, key in zip(axes[:, 0], keys):
         s, dr, wh, st = RUNS[key]
+        if not len(wh):
+            continue
         ax.plot(wh['stream_index'], wh['current_outlier_fraction'], lw=0.7, color='#2a78d6')
         ax.plot(wh['stream_index'], wh['reference_outlier_fraction'], lw=0.7, color='#eb6834')
         for i in (dr['stream_index'] if len(dr) else []):
